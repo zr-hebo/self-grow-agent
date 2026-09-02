@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta
+      name="description"
+      content="Self-Growing Agent 本地需求开发与动态 API 管理控制台"
+    >
+    <title>Agent Forge · 本地开发控制台</title>
+    <link rel="stylesheet" href="/console/assets/styles.css">
+    <script src="/console/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="ambient ambient-one" aria-hidden="true"></div>
+    <div class="ambient ambient-two" aria-hidden="true"></div>
+
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/console" aria-label="Agent Forge 控制台首页">
+          <span class="brand-mark" aria-hidden="true"><span></span></span>
+          <span>
+            <strong>Agent Forge</strong>
+            <small>SELF-GROWING RUNTIME</small>
+          </span>
+        </a>
+
+        <div class="runtime-status" aria-live="polite">
+          <span id="health-dot" class="status-dot status-offline"></span>
+          <span id="health-label">正在检查服务</span>
+        </div>
+
+        <form id="connection-form" class="connection-form">
+          <label for="management-key">管理密钥</label>
+          <input
+            id="management-key"
+            name="management-key"
+            type="password"
+            autocomplete="off"
+            placeholder="仅保存在当前页面内存"
+            required
+          >
+          <button class="button button-secondary" type="submit">连接</button>
+        </form>
+      </header>
+
+      <main class="workspace">
+        <aside class="panel requirements-panel" aria-labelledby="requirements-heading">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">WORK QUEUE</p>
+              <h1 id="requirements-heading">需求开发</h1>
+            </div>
+            <button id="new-requirement" class="icon-button" type="button" title="新建需求">
+              <span aria-hidden="true">＋</span>
+              <span class="sr-only">新建需求</span>
+            </button>
+          </div>
+
+          <div class="queue-summary">
+            <span><strong id="requirement-count">0</strong> 个需求</span>
+            <button id="refresh-all" class="text-button" type="button">刷新</button>
+          </div>
+
+          <div id="requirement-list" class="requirement-list" aria-live="polite">
+            <div class="empty-state compact">
+              <span class="empty-glyph">⌁</span>
+              <p>连接后查看本地需求记录</p>
+            </div>
+          </div>
+
+          <div class="storage-note">
+            <span class="storage-icon" aria-hidden="true">◉</span>
+            <span>
+              <strong>SQLite 本地元数据</strong>
+              <small>需求、状态与事件跨重启保留</small>
+            </span>
+          </div>
+        </aside>
+
+        <section class="panel editor-panel" aria-labelledby="editor-heading">
+          <div class="editor-heading-row">
+            <div>
+              <p class="eyebrow">FEATURE COMPOSER</p>
+              <h2 id="editor-heading">描述你要 Agent 实现的能力</h2>
+            </div>
+            <span id="editor-status" class="status-chip status-draft">新需求</span>
+          </div>
+
+          <p class="editor-lead">
+            保存需求草稿，然后由配置的生成后端生成、校验并热加载处理器。每次实现都有可追踪状态。
+          </p>
+
+          <form id="requirement-form" class="requirement-form">
+            <input id="requirement-id" type="hidden">
+            <input id="linked-route-id" type="hidden">
+
+            <label class="field field-wide" for="requirement-title">
+              <span>需求名称</span>
+              <input
+                id="requirement-title"
+                type="text"
+                maxlength="120"
+                placeholder="例如：个性化问候 API"
+                required
+              >
+            </label>
+
+            <div class="field-row">
+              <label class="field method-field" for="route-method">
+                <span>方法</span>
+                <select id="route-method">
+                  <option>GET</option>
+                  <option>POST</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                </select>
+              </label>
+
+              <label class="field path-field" for="route-path">
+                <span>业务路径</span>
+                <input id="route-path" type="text" maxlength="256" value="/hello" required>
+              </label>
+            </div>
+
+            <label class="field field-wide instruction-field" for="requirement-instruction">
+              <span>实现需求</span>
+              <textarea
+                id="requirement-instruction"
+                maxlength="8000"
+                rows="10"
+                placeholder="明确输入位置、默认值和返回 JSON。例如：读取 query.name，缺省为 world，返回 {&quot;message&quot;: &quot;hello &lt;name&gt;&quot;}。"
+                required
+              ></textarea>
+              <small><span id="instruction-length">0</span> / 8000</small>
+            </label>
+
+            <div id="linked-route-note" class="linked-route-note" hidden>
+              <span aria-hidden="true">↻</span>
+              <span>将基于 <strong id="linked-route-label"></strong> 的当前版本继续开发</span>
+              <button id="unlink-route" class="text-button" type="button">取消关联</button>
+              <button id="rebase-route" class="text-button" type="button" hidden>
+                同步最新版本
+              </button>
+            </div>
+
+            <div id="form-message" class="form-message" role="status" hidden></div>
+
+            <div class="form-actions">
+              <button id="save-requirement" class="button button-secondary" type="submit">
+                保存草稿
+              </button>
+              <button id="implement-requirement" class="button button-primary" type="button">
+                <span class="button-spark" aria-hidden="true">✦</span>
+                <span id="implement-label">生成并热加载</span>
+              </button>
+            </div>
+          </form>
+
+          <section class="timeline-section" aria-labelledby="timeline-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">TRACE</p>
+                <h3 id="timeline-heading">实现时间线</h3>
+              </div>
+              <span class="muted">Append-only events</span>
+            </div>
+            <ol id="event-list" class="event-list">
+              <li class="empty-event">选择一个需求查看事件</li>
+            </ol>
+          </section>
+        </section>
+
+        <aside class="panel runtime-panel" aria-labelledby="runtime-heading">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">LIVE RUNTIME</p>
+              <h2 id="runtime-heading">已发布 API</h2>
+            </div>
+            <span id="route-count" class="count-badge">0</span>
+          </div>
+
+          <div id="route-list" class="route-list">
+            <div class="empty-state compact">
+              <span class="empty-glyph">◇</span>
+              <p>还没有动态路由</p>
+            </div>
+          </div>
+
+          <section class="request-lab" aria-labelledby="request-lab-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">REQUEST LAB</p>
+                <h3 id="request-lab-heading">调用业务 API</h3>
+              </div>
+            </div>
+
+            <form id="request-form">
+              <div class="request-target">
+                <select id="request-method" aria-label="请求方法">
+                  <option>GET</option>
+                  <option>POST</option>
+                  <option>PUT</option>
+                  <option>PATCH</option>
+                  <option>DELETE</option>
+                </select>
+                <input id="request-path" aria-label="请求路径" value="/hello" required>
+              </div>
+              <label class="field" for="request-body">
+                <span>JSON 请求体（可选）</span>
+                <textarea id="request-body" rows="4" placeholder='{"name":"Ada"}'></textarea>
+              </label>
+              <button class="button button-secondary button-full" type="submit">发送请求</button>
+            </form>
+
+            <div class="response-console">
+              <div>
+                <span>RESPONSE</span>
+                <strong id="response-status">—</strong>
+              </div>
+              <pre id="response-output">等待调用业务 API…</pre>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>
