@@ -90,6 +90,7 @@ def test_generator_uses_responses_api_and_strict_json_schema() -> None:
     assert call["text"]["format"]["type"] == "json_schema"  # type: ignore[index]
     assert call["text"]["format"]["strict"] is True  # type: ignore[index]
     assert "GET /hello" in str(call["input"])
+    assert "POST, PUT, and\nPATCH parameters" in str(call["instructions"])
 
 
 def test_generator_includes_current_source_for_updates() -> None:

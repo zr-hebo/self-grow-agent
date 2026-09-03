@@ -473,7 +473,7 @@ curl -sS "$AGENT_URL/hello"
 - 不允许导入、装饰器、属性访问、循环、推导式、异步代码、生成器、异常、类、lambda、嵌套函数或私有标识符。
 - 只能调用 `get`、`str`、`int`、`float`、`bool`、`len`、`min`、`max`、`sum`、`abs` 和 `round`。
 - 不允许访问文件、网络或进程；因此不要要求处理器调用数据库、第三方 API、操作文件或运行命令。
-- `request` 是普通 JSON 对象，包含 `method`、`path`、`query`、`headers` 和 `body`。读取映射时应使用 `get(mapping, key, default)`。
+- `request` 是普通 JSON 对象，包含 `method`、`path`、`query`、`headers` 和 `body`。动态 API 的请求体统一为 JSON：无请求体时 `body` 为 `null`，否则为已解析的 JSON 值。POST、PUT、PATCH 的参数默认从 `body` 读取，例如 `get(get(request, "body", {}), "name", "world")`。推荐客户端发送 `Content-Type: application/json`；为兼容 `curl -d '{"name":"OK"}'`，有效 JSON 即使未声明该请求头也会被解析。非 JSON 请求体返回 `422`。读取映射时应使用 `get(mapping, key, default)`。
 - 处理器只能返回 JSON 兼容值。输入体、输出结果、执行时间和并发数都受配置限制；内存和 CPU 限制会在操作系统支持时生效。
 - 只有显式白名单中的业务请求头会传给处理器；`Authorization`、Cookie、API Key 和管理密钥不会传入生成代码。
 
@@ -488,6 +488,7 @@ LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和�
 | `404` | `dynamic route not found` | 业务方法或路径没有精确匹配活动路由。 |
 | `409` | 路由已存在、需求执行中或版本不一致 | 不要重复创建同一方法和路径；更新前重新查询版本。关联需求落后时，在控制台确认“同步最新版本”或调用 rebase 接口后再实现。 |
 | `413` | `request body is too large` | 请求体超过 `MAX_REQUEST_BODY_BYTES`。 |
+| `422` | `dynamic request body must be valid JSON` | 动态 API 的非空请求体不是有效 JSON。 |
 | `422` | 具体的路径、方法或代码校验错误 | 路径无效、路径被保留、方法不支持，或者 LLM 生成了不符合安全规则的源码；缩小并明确指令后重试。 |
 | `429` | `dynamic handler capacity is full` | 同时运行的处理器达到 `MAX_CONCURRENT_HANDLERS`，且等待超过 `HANDLER_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `429` | `generation capacity is full` | Pi 进程达到 `PI_MAX_CONCURRENT_RUNS`，且等待超过 `PI_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |

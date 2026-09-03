@@ -27,6 +27,8 @@ Output contract:
 
 Handler contract:
 - `request` is a plain JSON object with method, path, query, headers, and body fields.
+  `body` is null when absent; otherwise it is already decoded JSON. For POST, PUT,
+  and PATCH parameters, default to reading fields from `body` with `get`.
 - Allowed syntax is limited to local-name assignment, return, if, dict/list literals,
   subscripting/slicing, JSON scalar literals, arithmetic (+, -, *, /, //, %), unary
   not/+/- expressions, and/or expressions, comparisons (==, !=, <, <=, >, >=, in,

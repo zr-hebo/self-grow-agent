@@ -1210,14 +1210,16 @@ async def _build_request_context(
     body: Any = None
     raw_body = await _read_limited_body(request, max_body_bytes=max_body_bytes)
     if raw_body:
-        media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
-        if media_type == "application/json" or media_type.endswith("+json"):
-            try:
-                body = json.loads(raw_body)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                body = raw_body.decode("utf-8", errors="replace")
-        else:
-            body = raw_body.decode("utf-8", errors="replace")
+        # Dynamic APIs use JSON as their body contract.  Parse valid JSON even
+        # when a simple curl ``-d '{...}'`` omits Content-Type, while still
+        # documenting application/json as the interoperable client behaviour.
+        try:
+            body = json.loads(raw_body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="dynamic request body must be valid JSON",
+            ) from None
 
     headers = {
         name: value

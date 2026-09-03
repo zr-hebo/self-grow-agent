@@ -868,6 +868,61 @@ def test_post_business_route_receives_json_body(tmp_path: Path) -> None:
     }
 
 
+def test_post_business_route_defaults_to_json_body_without_content_type(
+    tmp_path: Path,
+) -> None:
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(
+            source=(
+                'def handle(request):\n'
+                '    body = get(request, "body", {})\n'
+                '    return {"name": get(body, "name", "missing")}\n'
+            )
+        )
+    )
+    client = TestClient(
+        create_test_app(settings=make_settings(tmp_path), generator=generator)
+    )
+    assert (
+        client.post(
+            "/api/v1/manage/routes",
+            headers=management_headers(),
+            json={"path": "/echo", "method": "POST", "instruction": "Echo name"},
+        ).status_code
+        == 201
+    )
+
+    response = client.post("/echo", content='{"name":"Tom"}')
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"name": "Tom"},
+    }
+
+
+def test_dynamic_request_body_rejects_non_json_parameters(tmp_path: Path) -> None:
+    runtime = RouteRuntime(make_settings(tmp_path).generated_dir)
+    runtime.create(
+        "/echo",
+        "POST",
+        'def handle(request):\n    return {"ok": True}\n',
+    )
+    client = TestClient(
+        create_test_app(
+            settings=make_settings(tmp_path),
+            generator=None,
+            runtime=runtime,
+        )
+    )
+
+    response = client.post("/echo", content="name=Tom")
+
+    assert response.status_code == 422
+    assert_api_error(response, "dynamic request body must be valid JSON")
+
+
 def test_json_suffix_media_type_is_parsed_as_json(tmp_path: Path) -> None:
     generator = FakeFeatureGenerator(
         GeneratedHandler(

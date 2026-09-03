@@ -163,7 +163,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 }
 ```
 
-它必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。当前版本支持纯数据转换，刻意不支持导入模块、属性访问、循环、网络、文件或子进程操作。
+它必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。动态 API 的请求体统一使用 JSON：有请求体时会作为解析后的 JSON 值传入 `request["body"]`，无请求体时为 `null`。POST 参数默认从该对象读取；推荐客户端发送 `Content-Type: application/json`，而 `curl -d '{"name":"OK"}'` 的有效 JSON 也会被兼容解析。非 JSON 请求体返回 `422`。当前版本支持纯数据转换，刻意不支持导入模块、属性访问、循环、网络、文件或子进程操作。
 
 ## 配置
 
