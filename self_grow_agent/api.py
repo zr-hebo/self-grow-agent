@@ -309,8 +309,14 @@ class MoveRouteRequest(BaseModel):
     path: str = Field(min_length=1, max_length=256)
     project: str = Field(min_length=1, max_length=63)
     expected_version: int = Field(ge=1)
+    instruction: str | None = Field(default=None, min_length=1, max_length=8_000)
 
     _normalize_project = field_validator("project")(normalize_project)
+
+    @field_validator("instruction")
+    @classmethod
+    def normalize_instruction(cls, value: str | None) -> str | None:
+        return None if value is None else _required_text(value)
 
 
 class CreateRequirementRequest(BaseModel):
@@ -508,6 +514,24 @@ def _public_route_path(project: str, path: str) -> str:
 
     normalized_path = normalize_path(path)
     return f"/{project}{normalized_path}"
+
+
+def _route_move_instruction(
+    current: RouteRecord,
+    target_path: str,
+    additional_instruction: str | None,
+) -> str:
+    """Describe a behavior-preserving handler regeneration for a route move."""
+
+    instruction = (
+        f"Migrate the existing {current.method} handler from {current.path} to "
+        f"{target_path}. Preserve its business behavior and response contract. "
+        f"Replace any hard-coded validation or reference to {current.path} with "
+        f"{target_path}. Return a complete handler for the target path."
+    )
+    if additional_instruction is not None:
+        instruction += f"\n\nAdditional requirement:\n{additional_instruction}"
+    return instruction
 
 
 def _active_publications(runtime: RouteRuntime) -> dict[str, tuple[int, str]]:
@@ -853,32 +877,65 @@ def create_app(
 
     @app.post(
         "/api/v1/manage/routes/{route_id}/move",
-        response_model=ApiResponse[RouteResponse],
+        response_model=ApiResponse[RouteTaskResponse],
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[management_auth],
         tags=["management"],
     )
     async def move_route(route_id: str, payload: MoveRouteRequest) -> dict[str, Any]:
+        if active_generator is None:
+            raise LLMUnavailableError("LLM is not configured")
         current = active_runtime.get(route_id)
         if current is None:
             raise ManagedRouteNotFoundError("managed route not found")
+        if current.version != payload.expected_version:
+            raise ManagedVersionConflictError(payload.expected_version, current.version)
         public_path = _public_route_path(payload.project, payload.path)
-        active_runtime.validate_route(public_path, current.method)
+        normalized_path, normalized_method = active_runtime.validate_route(
+            public_path,
+            current.method,
+        )
+        if current.path == normalized_path and current.project == payload.project:
+            raise RouteValidationError("route already has the requested project and path")
+        existing = active_runtime.resolve(normalized_method, normalized_path)
+        if existing is not None and existing.route_id != current.route_id:
+            raise RouteAlreadyExistsError(
+                f"route {normalized_method} {normalized_path} already exists"
+            )
         await asyncio.to_thread(active_requirement_store.ensure_route_can_move, route_id)
-        moved = active_runtime.move(
-            route_id,
-            path=public_path,
+        instruction = _route_move_instruction(
+            current,
+            normalized_path,
+            payload.instruction,
+        )
+        requirement = await asyncio.to_thread(
+            active_requirement_store.create,
+            _route_requirement_title(payload.project, normalized_method, normalized_path),
+            instruction,
+            normalized_path,
+            normalized_method,
             project=payload.project,
-            expected_version=payload.expected_version,
+            route_id=current.route_id,
+            route_version=current.version,
         )
-        await asyncio.to_thread(
-            active_requirement_store.move_route_links,
-            route_id,
-            route_id=moved.route_id,
-            route_version=moved.version,
-            path=moved.path,
-            project=moved.project,
+        _logger.info(
+            "route_move accepted operation_id=%s route_id=%s project=%s method=%s path=%s",
+            requirement.id,
+            current.route_id,
+            requirement.project,
+            requirement.method,
+            requirement.path,
         )
-        return _api_success(RouteResponse.from_record(moved))
+        start_requirement_implementation(requirement.id)
+        return _api_success(
+            RouteTaskResponse(
+                operation_id=requirement.id,
+                project=requirement.project,
+                path=requirement.path,
+                method=requirement.method,
+                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+            )
+        )
 
     @app.get(
         "/api/v1/manage/requirements",
@@ -1116,12 +1173,47 @@ def create_app(
                     raise RequirementStorageError(
                         "linked requirement has no route version"
                     )
-                route = await service.update_route(
-                    route_id=requirement.route_id,
-                    instruction=requirement.instruction,
-                    expected_version=requirement.route_version,
-                    before_publish=prepare_publication,
+                current_route = active_runtime.get(requirement.route_id)
+                if current_route is None:
+                    raise ManagedRouteNotFoundError("managed route not found")
+                is_route_move = (
+                    current_route.path != requirement.path
+                    or current_route.project != requirement.project
                 )
+                if is_route_move:
+                    if current_route.method != requirement.method:
+                        raise RouteValidationError(
+                            "a route move cannot change the HTTP method"
+                        )
+                    await asyncio.to_thread(
+                        active_requirement_store.ensure_route_can_move,
+                        current_route.route_id,
+                        exclude_requirement_id=requirement.id,
+                    )
+                    route = await service.move_route(
+                        route_id=current_route.route_id,
+                        path=requirement.path,
+                        project=requirement.project,
+                        instruction=requirement.instruction,
+                        expected_version=requirement.route_version,
+                        before_publish=prepare_publication,
+                    )
+                    await asyncio.to_thread(
+                        active_requirement_store.move_route_links,
+                        current_route.route_id,
+                        route_id=route.route_id,
+                        route_version=route.version,
+                        path=route.path,
+                        project=route.project,
+                        exclude_requirement_id=requirement.id,
+                    )
+                else:
+                    route = await service.update_route(
+                        route_id=requirement.route_id,
+                        instruction=requirement.instruction,
+                        expected_version=requirement.route_version,
+                        before_publish=prepare_publication,
+                    )
         except Exception as exc:
             safe_error = _safe_requirement_error(exc)
             await fail_requirement(requirement_id, safe_error)

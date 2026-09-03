@@ -2,6 +2,7 @@ import asyncio
 import logging
 import secrets
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -16,7 +17,7 @@ from self_grow_agent.api import _instruction_for_log, _request_parameters_for_lo
 from self_grow_agent.api import create_app as build_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
 from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
-from self_grow_agent.llm import GenerationCapacityError
+from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
@@ -84,6 +85,7 @@ class AsyncBlockingFeatureGenerator:
         self._result = result
         self.started = asyncio.Event()
         self.release = asyncio.Event()
+        self.calls: list[dict[str, object]] = []
 
     async def generate(
         self,
@@ -93,7 +95,14 @@ class AsyncBlockingFeatureGenerator:
         method: str,
         current_source: str | None = None,
     ) -> GeneratedHandler:
-        del instruction, path, method, current_source
+        self.calls.append(
+            {
+                "instruction": instruction,
+                "path": path,
+                "method": method,
+                "current_source": current_source,
+            }
+        )
         self.started.set()
         await self.release.wait()
         return self._result
@@ -601,7 +610,97 @@ def test_all_projects_publish_below_their_project_prefix(tmp_path: Path) -> None
     assert client.post("/binlog-server/rebuild_replication").status_code == 200
 
 
-def test_existing_route_can_move_to_a_named_project_prefix(tmp_path: Path) -> None:
+def test_existing_route_move_regenerates_asynchronously_before_switching(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    original_source = '''\
+def handle(request):
+    if get(request, "path", "") != "/rebuild_replication":
+        return {"ok": False, "error": "path not found"}
+    return {"ok": True, "version": "old"}
+'''
+    original = runtime.create(
+        "/rebuild_replication",
+        "POST",
+        original_source,
+    )
+    regenerated_source = '''\
+def handle(request):
+    if get(request, "path", "") != "/binlog-server/rebuild_replication":
+        return {"ok": False, "error": "path not found"}
+    return {"ok": True, "version": "new"}
+'''
+    generator = AsyncBlockingFeatureGenerator(
+        GeneratedHandler(source=regenerated_source, description="Moved handler")
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+    )
+
+    async def run_scenario() -> tuple[httpx.Response, dict[str, object]]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            accepted = await client.post(
+                f"/api/v1/manage/routes/{original.route_id}/move",
+                headers=management_headers(),
+                json={
+                    "project": "binlog-server",
+                    "path": "/rebuild_replication",
+                    "expected_version": 1,
+                },
+            )
+            assert accepted.status_code == 202
+            assert await asyncio.wait_for(generator.started.wait(), timeout=1)
+            assert (await client.post("/rebuild_replication")).json()["data"] == {
+                "ok": True,
+                "version": "old",
+            }
+            assert (await client.post("/binlog-server/rebuild_replication")).status_code == 404
+            generator.release.set()
+            operation = api_data(accepted)
+            for _ in range(100):
+                result = api_data(
+                    await client.get(
+                        operation["operation_url"],
+                        headers=management_headers(),
+                    )
+                )
+                if result["status"] == "finish":
+                    return accepted, result
+                await asyncio.sleep(0.01)
+        raise AssertionError("route move did not finish")
+
+    accepted, completed = asyncio.run(run_scenario())
+
+    assert api_data(accepted)["path"] == "/binlog-server/rebuild_replication"
+    assert completed["path"] == "/binlog-server/rebuild_replication"
+    assert completed["project"] == "binlog-server"
+    assert completed["route_version"] == 2
+    assert generator.calls == [
+        {
+            "instruction": generator.calls[0]["instruction"],
+            "path": "/binlog-server/rebuild_replication",
+            "method": "POST",
+            "current_source": original_source,
+        }
+    ]
+    client = TestClient(app)
+    assert client.post("/rebuild_replication").status_code == 404
+    assert client.post("/binlog-server/rebuild_replication").json()["data"] == {
+        "ok": True,
+        "version": "new",
+    }
+
+
+def test_failed_async_route_move_keeps_the_original_route(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     runtime = RouteRuntime(settings.generated_dir)
     original = runtime.create(
@@ -609,56 +708,36 @@ def test_existing_route_can_move_to_a_named_project_prefix(tmp_path: Path) -> No
         "POST",
         'def handle(request):\n    return {"ok": True}\n',
     )
+    generator = FakeFeatureGenerator(GenerationError("Pi generation failed"))
     app = build_app(
         settings=settings,
-        generator=None,
+        generator=generator,
         runtime=runtime,
         handler_executor=InlineHandlerExecutor(),
     )
-    client = TestClient(app)
-    requirement = client.post(
-        "/api/v1/manage/requirements",
-        headers=management_headers(),
-        json={
-            "title": "Rebuild replication",
-            "instruction": "Return ok",
-            "path": "/rebuild_replication",
-            "method": "POST",
-            "route_id": original.route_id,
-        },
-    )
 
-    moved = client.post(
-        f"/api/v1/manage/routes/{original.route_id}/move",
-        headers=management_headers(),
-        json={
-            "project": "binlog-server",
-            "path": "/rebuild_replication",
-            "expected_version": 1,
-        },
-    )
-
-    assert requirement.status_code == 201
-    assert moved.status_code == 200
-    assert api_data(moved)["path"] == "/binlog-server/rebuild_replication"
-    assert api_data(moved)["project"] == "binlog-server"
-    assert api_data(moved)["version"] == 2
-    assert client.post("/rebuild_replication").status_code == 404
-    assert client.post("/binlog-server/rebuild_replication").json() == {
-        "code": 0,
-        "message": "OK",
-        "data": {"ok": True},
-    }
-    moved_requirement = api_data(
-        client.get(
-            f"/api/v1/manage/requirements/{api_data(requirement)['id']}",
+    with TestClient(app) as client:
+        accepted = client.post(
+            f"/api/v1/manage/routes/{original.route_id}/move",
             headers=management_headers(),
+            json={
+                "project": "binlog-server",
+                "path": "/rebuild_replication",
+                "expected_version": 1,
+            },
         )
-    )
-    assert moved_requirement["route_id"] == api_data(moved)["route_id"]
-    assert moved_requirement["route_version"] == 2
-    assert moved_requirement["path"] == "/binlog-server/rebuild_replication"
-    assert moved_requirement["project"] == "binlog-server"
+        operation_url = api_data(accepted)["operation_url"]
+        for _ in range(100):
+            failed = api_data(client.get(operation_url, headers=management_headers()))
+            if failed["status"] == "failed":
+                break
+            time.sleep(0.01)
+
+        assert accepted.status_code == 202
+        assert failed["status"] == "failed"
+        assert failed["last_error"] == "Pi generation failed"
+        assert client.post("/rebuild_replication").status_code == 200
+        assert client.post("/binlog-server/rebuild_replication").status_code == 404
 
 
 def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:

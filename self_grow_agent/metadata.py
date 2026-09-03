@@ -722,15 +722,33 @@ class RequirementStore:
             connection.commit()
         return self.get(requirement_id)
 
-    def ensure_route_can_move(self, route_id: str) -> None:
+    def ensure_route_can_move(
+        self,
+        route_id: str,
+        *,
+        exclude_requirement_id: str | None = None,
+    ) -> None:
         """Reject a route move while one of its linked requirements is active."""
 
         route_id = _validate_text("route_id", route_id)
+        if exclude_requirement_id is not None:
+            exclude_requirement_id = _validate_text(
+                "exclude_requirement_id",
+                exclude_requirement_id,
+            )
         with self._connection() as connection:
-            row = connection.execute(
-                "SELECT id FROM requirements WHERE route_id = ? AND status = ? LIMIT 1",
-                (route_id, "implementing"),
-            ).fetchone()
+            if exclude_requirement_id is None:
+                row = connection.execute(
+                    "SELECT id FROM requirements "
+                    "WHERE route_id = ? AND status = ? LIMIT 1",
+                    (route_id, "implementing"),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT id FROM requirements "
+                    "WHERE route_id = ? AND status = ? AND id != ? LIMIT 1",
+                    (route_id, "implementing", exclude_requirement_id),
+                ).fetchone()
         if row is not None:
             raise RequirementBusyError(
                 f"route {route_id!r} has a requirement being implemented"
@@ -744,6 +762,7 @@ class RequirementStore:
         route_version: int,
         path: str,
         project: str,
+        exclude_requirement_id: str | None = None,
     ) -> None:
         """Move all inactive linked requirements to a route's new identity."""
 
@@ -753,33 +772,50 @@ class RequirementStore:
         assert route_version is not None
         path = _validate_text("path", path)
         project = normalize_project(project)
+        if exclude_requirement_id is not None:
+            exclude_requirement_id = _validate_text(
+                "exclude_requirement_id",
+                exclude_requirement_id,
+            )
         timestamp = _serialize_time(_now())
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            busy = connection.execute(
-                "SELECT id FROM requirements WHERE route_id = ? AND status = ? LIMIT 1",
-                (previous_route_id, "implementing"),
-            ).fetchone()
+            if exclude_requirement_id is None:
+                busy = connection.execute(
+                    "SELECT id FROM requirements "
+                    "WHERE route_id = ? AND status = ? LIMIT 1",
+                    (previous_route_id, "implementing"),
+                ).fetchone()
+            else:
+                busy = connection.execute(
+                    "SELECT id FROM requirements "
+                    "WHERE route_id = ? AND status = ? AND id != ? LIMIT 1",
+                    (previous_route_id, "implementing", exclude_requirement_id),
+                ).fetchone()
             if busy is not None:
                 raise RequirementBusyError(
                     f"route {previous_route_id!r} has a requirement being implemented"
                 )
+            exclusion_sql = "" if exclude_requirement_id is None else " AND id != ?"
+            parameters: tuple[object, ...] = (
+                route_id,
+                route_version,
+                path,
+                project,
+                timestamp,
+                previous_route_id,
+            )
+            if exclude_requirement_id is not None:
+                parameters += (exclude_requirement_id,)
             connection.execute(
-                """
+                f"""
                 UPDATE requirements
                 SET route_id = ?, route_version = ?, path = ?, project = ?,
                     target_route_id = NULL, target_route_version = NULL,
                     target_source_sha256 = NULL, updated_at = ?
-                WHERE route_id = ?
+                WHERE route_id = ?{exclusion_sql}
                 """,
-                (
-                    route_id,
-                    route_version,
-                    path,
-                    project,
-                    timestamp,
-                    previous_route_id,
-                ),
+                parameters,
             )
             connection.commit()
 

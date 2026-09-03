@@ -155,6 +155,48 @@ class AgentManagementService:
             description=generated.description,
         )
 
+    async def move_route(
+        self,
+        *,
+        route_id: str,
+        path: str,
+        project: str,
+        instruction: str,
+        expected_version: int,
+        before_publish: PublicationHook | None = None,
+    ) -> RouteRecord:
+        """Regenerate a handler for its target path, then atomically move it."""
+
+        current = self.runtime.get(route_id)
+        if current is None:
+            raise ManagedRouteNotFoundError("managed route not found")
+        if current.version != expected_version:
+            raise ManagedVersionConflictError(expected_version, current.version)
+
+        normalized_path, _ = self.runtime.validate_route(path, current.method)
+        normalized_project = self.runtime.normalize_project(project)
+        generated = await self._generate(
+            instruction=instruction,
+            path=normalized_path,
+            method=current.method,
+            current_source=current.source,
+        )
+        target_route_id = self.runtime.route_id_for(normalized_path, current.method)
+        if before_publish is not None:
+            await before_publish(
+                target_route_id,
+                expected_version + 1,
+                generated.source,
+            )
+        return self.runtime.move(
+            route_id,
+            path=normalized_path,
+            project=normalized_project,
+            expected_version=expected_version,
+            source=generated.source,
+            description=generated.description,
+        )
+
     async def _generate(
         self,
         *,

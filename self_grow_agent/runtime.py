@@ -290,8 +290,10 @@ class RouteRuntime:
         path: str,
         project: str,
         expected_version: int,
+        source: str | None = None,
+        description: str | None = None,
     ) -> RouteRecord:
-        """Atomically move a route to a new public path and project."""
+        """Atomically move a route and optionally replace its generated handler."""
 
         route_id = self._validate_route_id(route_id)
         normalized_path, normalized_method = self.validate_route(path, "GET")
@@ -319,14 +321,23 @@ class RouteRuntime:
             if existing_by_id is not None and existing_by_id.route_id != current.route_id:
                 raise RouteAlreadyExistsError(f"route id {target_route_id!r} already exists")
 
+        candidate_source = (
+            current.source if source is None else self._validate_source(source)
+        )
+        candidate_description = (
+            current.description
+            if description is None
+            else self._validate_description(description)
+        )
+
         candidate = self._build_record(
             route_id=target_route_id,
             path=normalized_path,
             method=normalized_method,
             project=project,
             version=expected_version + 1,
-            source=current.source,
-            description=current.description,
+            source=candidate_source,
+            description=candidate_description,
         )
 
         with self._lock:
@@ -347,7 +358,7 @@ class RouteRuntime:
             next_records = dict(self._records)
             next_records.pop((active.method, active.path))
             next_records[target_key] = candidate
-            self._commit_records(next_records, candidate, candidate.source)
+            self._commit_records(next_records, candidate, candidate_source)
         return candidate
 
     def get(self, route_id: str) -> RouteRecord | None:

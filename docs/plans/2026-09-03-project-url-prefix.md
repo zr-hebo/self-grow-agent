@@ -4,7 +4,7 @@
 
 **Goal:** Publish named-project dynamic APIs under `/{project}`; for example, `binlog-server` plus `/rebuild_replication` serves `/binlog-server/rebuild_replication`.
 
-**Architecture:** Management endpoints accept project-relative paths and convert them once at the API boundary to a public path stored in `RouteRuntime` and SQLite. Every project, including `default`, receives an explicit `/{project}` prefix. Existing persisted root routes must be migrated through the explicit move endpoint; linked requirements keep their already-public route path.
+**Architecture:** Management endpoints accept project-relative paths and convert them once at the API boundary to a public path stored in `RouteRuntime` and SQLite. Every project, including `default`, receives an explicit `/{project}` prefix. Existing persisted root routes are migrated through an asynchronous move operation: the current route remains active while Pi/LLM regenerates its handler for the target path, then the runtime atomically switches to the generated handler and linked requirements follow the new route identity.
 
 **Tech Stack:** Python 3.12+, FastAPI, SQLite, pytest.
 
@@ -85,28 +85,33 @@ Expected: PASS.
 - Test: `tests/test_api.py`
 - Test: `tests/test_metadata.py`
 
-**Step 1: Write a failing migration test**
+**Step 1: Write failing asynchronous migration tests**
 
 ```python
-moved = client.post(
+accepted = client.post(
     "/api/v1/manage/routes/post-rebuild_replication/move",
     headers=management_headers(),
     json={"project": "binlog-server", "path": "/rebuild_replication", "expected_version": 1},
 )
-assert api_data(moved)["path"] == "/binlog-server/rebuild_replication"
+assert accepted.status_code == 202
+assert client.post("/rebuild_replication").status_code == 200
+# Poll api_data(accepted)["operation_url"] until status == "finish".
 assert client.post("/rebuild_replication").status_code == 404
 assert client.post("/binlog-server/rebuild_replication").status_code == 200
 ```
+
+Also verify that a generation failure records `failed`, leaves the old route active,
+and does not publish the target route.
 
 **Step 2: Verify failure**
 
 Run: `uv run pytest tests/test_api.py::test_existing_route_can_move_to_a_named_project_prefix -q`
 
-Expected: FAIL because no route-migration endpoint exists.
+Expected: FAIL because the current migration is synchronous and retains the old source.
 
-**Step 3: Implement an atomic move**
+**Step 3: Implement asynchronous regenerate-and-move**
 
-Add `POST /api/v1/manage/routes/{route_id}/move`, requiring management authentication, the target `project`, a project-relative `path`, and `expected_version`. `RouteRuntime` must atomically publish a new route record under the public target path, remove the old method/path record, retain the handler source, and increment the route version. Update linked SQLite requirements to the new `route_id`, public path, and version in the same managed operation; reject conflicts instead of overwriting another route.
+`POST /api/v1/manage/routes/{route_id}/move` requires management authentication, the target `project`, a project-relative `path`, and `expected_version`, and returns an HTTP 202 operation receipt. Create a persisted requirement and regenerate from the current source for the target public path in a background task. Keep the old route active until generation and validation succeed. `RouteRuntime` then atomically publishes the generated source under the target path, removes the old method/path record, and increments the route version. Update linked SQLite requirements to the new `route_id`, public path, and version; reject conflicts instead of overwriting another route. If generation fails, mark the operation failed and keep the old route unchanged.
 
 **Step 4: Verify pass**
 
