@@ -361,6 +361,7 @@ def create_app(
     runtime: RouteRuntime | None = None,
     handler_executor: HandlerExecutor | None = None,
     requirement_store: RequirementStore | None = None,
+    lifespan: Any | None = None,
 ) -> FastAPI:
     """Build one application instance, allowing deterministic dependency injection."""
 
@@ -388,7 +389,7 @@ def create_app(
     )
     handler_slots = asyncio.Semaphore(active_settings.max_concurrent_handlers)
 
-    app = FastAPI(title="Self-Growing Agent", version="0.1.0")
+    app = FastAPI(title="Self-Growing Agent", version="0.1.0", lifespan=lifespan)
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=active_settings.max_request_body_bytes,

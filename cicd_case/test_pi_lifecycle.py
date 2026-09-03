@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cicd_case.conftest import LLM_API_KEY, AgentStack
+from cicd_case.conftest import LLM_API_KEY, MANAGEMENT_KEY, AgentStack
 
 PI_STUB = Path(__file__).with_name("pi_rpc_stub.py").resolve()
 
@@ -48,8 +48,9 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
         }
         assert stack.stub.requests == []
         assert not workspace_root.exists() or list(workspace_root.iterdir()) == []
-        assert LLM_API_KEY not in stack.service_log_path.read_text(
-            encoding="utf-8", errors="replace"
-        )
+        service_log = stack.service_log_path.read_text(encoding="utf-8", errors="replace")
+        assert "Management API key configured (fingerprint=sha256:" in service_log
+        assert LLM_API_KEY not in service_log
+        assert MANAGEMENT_KEY not in service_log
     finally:
         stack.close()
