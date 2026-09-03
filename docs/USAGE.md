@@ -245,7 +245,7 @@ Agent 把 API 分为两个平面：
 
 ## 项目分组
 
-创建动态 API 或控制台需求时应填写 `project`，例如 `customer-portal` 或 `billing`。项目名会标准化为小写，必须以字母开头，只能包含小写字母、数字和连字符，最长 63 个字符。运行时、SQLite 需求记录和控制台会按该字段归类；`GET /api/v1/manage/routes?project=billing` 可只查询一个项目的路由。
+创建动态 API 或控制台需求时应填写 `project`，例如 `customer-portal` 或 `billing`。项目名会标准化为小写，必须以字母开头，只能包含小写字母、数字和连字符，最长 63 个字符。创建成功的管理响应会返回规范化后的 `project`。运行时、SQLite 需求记录和控制台会按该字段归类；`GET /api/v1/manage/routes?project=billing` 和 `GET /api/v1/manage/requirements?project=billing` 可只查询一个项目的数据。
 
 项目是逻辑分组，不是 URL 命名空间：不同项目仍不能发布相同的 HTTP 方法和路径。升级前已存在的路由和需求会自动归入 `default` 项目，保持可恢复性。
 
