@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import textwrap
 import time
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
 
+import self_grow_agent.executor as executor_module
 from self_grow_agent.executor import (
     HandlerProcessError,
     HandlerTimeoutError,
@@ -41,6 +44,30 @@ def _abrupt_exit_worker(
 ) -> None:
     del source, module_name, request
     os._exit(7)
+
+
+def _close_ipc_and_ignore_terminate(
+    connection: Connection,
+    worker: object,
+    source: str,
+    module_name: str,
+    request: dict[str, object],
+    memory_limit_bytes: int | None,
+    cpu_limit_seconds: int | None,
+    max_result_bytes: int,
+) -> None:
+    del (
+        worker,
+        source,
+        module_name,
+        request,
+        memory_limit_bytes,
+        cpu_limit_seconds,
+        max_result_bytes,
+    )
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    connection.close()
+    time.sleep(10)
 
 
 def test_executes_reloaded_handler_in_subprocess() -> None:
@@ -95,9 +122,37 @@ def test_logs_process_stage_and_exit_code_when_worker_exits_before_response(
     assert str(raised.value) == "Generated handler process failed"
     process_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "generated_handler_process failed stage=receive" in process_logs
-    assert "exit_code=7" in process_logs
-    assert "signal=None" in process_logs
+    assert "observed_exit_code=7" in process_logs
+    assert "observed_signal=None" in process_logs
+    assert "cleanup_action=none" in process_logs
+    assert "final_exit_code=7" in process_logs
+    assert "final_signal=None" in process_logs
     assert "error_type=EOFError" in process_logs
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX signal handling")
+def test_logs_parent_cleanup_signal_separately_from_observed_worker_exit(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        executor_module,
+        "_process_main",
+        _close_ipc_and_ignore_terminate,
+    )
+    executor = ProcessHandlerExecutor(timeout_seconds=5)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with pytest.raises(HandlerProcessError, match="process failed"):
+        executor.execute(VALID_SOURCE, "closed_ipc_v1", {})
+
+    process_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "generated_handler_process failed stage=receive" in process_logs
+    assert "observed_exit_code=None" in process_logs
+    assert "observed_signal=None" in process_logs
+    assert "cleanup_action=terminate_then_kill" in process_logs
+    assert "final_exit_code=-9" in process_logs
+    assert "final_signal=SIGKILL" in process_logs
 
 
 def test_spawned_handler_import_does_not_recover_active_operation(

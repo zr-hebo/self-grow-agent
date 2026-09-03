@@ -9,6 +9,7 @@ import multiprocessing
 import signal
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any, Protocol
@@ -27,6 +28,14 @@ HandlerWorker = Callable[[str, str, dict[str, Any]], Any]
 _ERROR_RESPONSE = b'{"status":"error","message":"generated handler process failed"}'
 _PROCESS_ERROR_MESSAGE = "Generated handler process failed"
 _logger = logging.getLogger("uvicorn.error")
+
+
+@dataclass(frozen=True)
+class _ProcessCleanup:
+    process_id: int | None
+    observed_exit_code: int | None
+    action: str
+    final_exit_code: int | None
 
 
 class HandlerExecutor(Protocol):
@@ -174,18 +183,27 @@ class ProcessHandlerExecutor:
             return response["result"]
         finally:
             receive_connection.close()
-            process_id: int | None = process.pid if started else None
-            exit_code: int | None = None
+            cleanup = _ProcessCleanup(
+                process_id=process.pid if started else None,
+                observed_exit_code=None,
+                action="none",
+                final_exit_code=None,
+            )
             if started:
-                process_id, exit_code = _reap_process(process)
+                cleanup = _reap_process(process)
             if failure_stage is not None:
                 _logger.warning(
                     "generated_handler_process failed stage=%s pid=%s "
-                    "exit_code=%s signal=%s error_type=%s",
+                    "observed_exit_code=%s observed_signal=%s "
+                    "cleanup_action=%s final_exit_code=%s final_signal=%s "
+                    "error_type=%s",
                     failure_stage,
-                    process_id,
-                    exit_code,
-                    _exit_signal_name(exit_code),
+                    cleanup.process_id,
+                    cleanup.observed_exit_code,
+                    _exit_signal_name(cleanup.observed_exit_code),
+                    cleanup.action,
+                    cleanup.final_exit_code,
+                    _exit_signal_name(cleanup.final_exit_code),
                     failure_error_type,
                 )
 
@@ -293,18 +311,27 @@ def _exit_signal_name(exit_code: int | None) -> str | None:
         return f"SIG{-exit_code}"
 
 
-def _reap_process(process: BaseProcess) -> tuple[int | None, int | None]:
+def _reap_process(process: BaseProcess) -> _ProcessCleanup:
     process_id = process.pid
-    if process.is_alive():
+    observed_exit_code = process.exitcode
+    cleanup_action = "none"
+    if observed_exit_code is None:
+        cleanup_action = "terminate"
         process.terminate()
         process.join(timeout=0.2)
     else:
         process.join()
 
     if process.is_alive() and hasattr(process, "kill"):
+        cleanup_action = "terminate_then_kill"
         process.kill()
         process.join(timeout=0.2)
-    exit_code = process.exitcode
+    final_exit_code = process.exitcode
     if not process.is_alive():
         process.close()
-    return process_id, exit_code
+    return _ProcessCleanup(
+        process_id=process_id,
+        observed_exit_code=observed_exit_code,
+        action=cleanup_action,
+        final_exit_code=final_exit_code,
+    )
