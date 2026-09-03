@@ -68,7 +68,7 @@ curl -sS "$AGENT_URL/healthz"
 预期返回：
 
 ```json
-{"code":0,"message":"OK","data":{"status":"ok","event_time":"2026-09-03T12:34:56.789Z"}}
+{"code":0,"message":"OK","data":{"status":"ok","event_time":"2026-09-03T20:34:56.789+08:00"}}
 ```
 
 ### 4. 让 Agent 添加第一个 API
@@ -206,7 +206,7 @@ curl -sS 'http://127.0.0.1:8000/healthz'
 预期响应：
 
 ```json
-{"code":0,"message":"OK","data":{"status":"ok","event_time":"2026-09-03T12:34:56.789Z"}}
+{"code":0,"message":"OK","data":{"status":"ok","event_time":"2026-09-03T20:34:56.789+08:00"}}
 ```
 
 ## 使用本地开发控制台（推荐）
@@ -255,7 +255,7 @@ Agent 把 API 分为两个平面：
 {"code":0,"message":"OK","data":null}
 ```
 
-其中 `code` 固定为 `0`，`message` 固定为 `OK`，`data` 可以是对象、数组、字符串、数字、布尔值或 `null`。`/healthz` 也使用该成功信封，并在 `data.event_time` 中返回每次调用时生成的 RFC 3339 UTC 时间戳。管理 API 保持既有的响应契约；业务失败仍通过对应的 HTTP 状态码和 `detail` 返回。
+其中 `code` 固定为 `0`，`message` 固定为 `OK`，`data` 可以是对象、数组、字符串、数字、布尔值或 `null`。`/healthz` 也使用该成功信封，并在 `data.event_time` 中返回每次调用时生成的 RFC 3339 北京时间（`+08:00`）时间戳。控制台默认以北京时间展示需求和事件时间。管理 API 保持既有的响应契约；业务失败仍通过对应的 HTTP 状态码和 `detail` 返回。
 
 ## 并发访问业务 API
 

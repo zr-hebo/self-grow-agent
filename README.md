@@ -7,7 +7,7 @@
 - **管理面**：管理员用自然语言要求 LLM 新增或修改 API；生成物验证通过后，无需重启进程即可生效。
 - **开发控制台**：在 `/console` 保存需求、触发实现、查看 SQLite 时间线和调用已发布 API。
 
-动态业务 API 的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；生成处理器的返回值位于 `data`。`/healthz` 也使用该结构，且在 `data.event_time` 返回调用时的 UTC 时间。管理 API 维持原有契约。
+动态业务 API 的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；生成处理器的返回值位于 `data`。`/healthz` 也使用该结构，且在 `data.event_time` 返回调用时的北京时间（`+08:00`）。管理 API 维持原有契约。
 
 每个动态 API 还带有 `project` 逻辑分组。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名；控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。项目是逻辑分组，不是 URL 命名空间，因此跨项目也不能重复使用相同的 HTTP 方法和路径；升级前的路由与需求会归入 `default`。
 

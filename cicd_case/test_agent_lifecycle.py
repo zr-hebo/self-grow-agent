@@ -127,7 +127,7 @@ def test_concurrent_business_requests(agent_stack) -> None:
     assert health.json()["code"] == 0
     assert health.json()["message"] == "OK"
     assert health.json()["data"]["status"] == "ok"
-    assert health.json()["data"]["event_time"].endswith("Z")
+    assert health.json()["data"]["event_time"].endswith("+08:00")
 
 
 def test_console_requirement_metadata_survives_restart(agent_stack) -> None:

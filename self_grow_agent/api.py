@@ -6,9 +6,10 @@ import asyncio
 import hashlib
 import json
 import secrets
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -80,6 +81,7 @@ _CONSOLE_SECURITY_HEADERS = {
 }
 _REQUIREMENT_FINALIZE_ATTEMPTS = 3
 _BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
+_BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 def _required_text(value: str) -> str:
@@ -96,9 +98,9 @@ def _business_success(data: Any) -> dict[str, Any]:
 
 
 def _event_time() -> str:
-    """Return the API event time in an unambiguous, machine-readable format."""
+    """Return the API event time in Beijing time using an ISO 8601 offset."""
 
-    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(_BEIJING_TIMEZONE).isoformat(timespec="milliseconds")
 
 
 class RequestBodyLimitMiddleware:
