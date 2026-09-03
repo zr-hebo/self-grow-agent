@@ -375,7 +375,7 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
     )
 
     assert implemented.status_code == 200
-    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["status"] == "finish"
     assert api_data(implemented)["route_id"] == "get-hello"
     assert api_data(implemented)["route_version"] == 1
     assert client.get("/hello").json() == {
@@ -432,7 +432,7 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
     assert api_data(edited)["route_id"] == "get-hello"
     assert api_data(edited)["route_version"] == 1
     assert second_implementation.status_code == 200
-    assert api_data(second_implementation)["status"] == "active"
+    assert api_data(second_implementation)["status"] == "finish"
     assert api_data(second_implementation)["route_version"] == 2
     assert client.get("/hello").json() == {
         "code": 0,
@@ -554,7 +554,7 @@ def test_requirement_can_rebase_after_route_is_updated_directly(
     assert api_data(rebased)["route_id"] == existing.route_id
     assert api_data(rebased)["route_version"] == 2
     assert implemented.status_code == 200
-    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["status"] == "finish"
     assert api_data(implemented)["route_version"] == 3
     assert client.get("/hello").json() == {
         "code": 0,
@@ -603,7 +603,7 @@ def test_transient_completion_conflict_is_retried_without_regenerating(
     )
 
     assert implemented.status_code == 200
-    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["status"] == "finish"
     assert api_data(implemented)["route_version"] == 1
     assert store.complete_attempts == 2
     assert len(generator.calls) == 1
@@ -661,7 +661,7 @@ def test_published_receipt_is_reconciled_without_regenerating(
     )
 
     assert reconciled.status_code == 200
-    assert api_data(reconciled)["status"] == "active"
+    assert api_data(reconciled)["status"] == "finish"
     assert api_data(reconciled)["route_version"] == 1
     assert len(generator.calls) == 1
 
@@ -723,7 +723,7 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
 
     requirement, business = asyncio.run(run_scenario())
 
-    assert requirement["status"] == "active"
+    assert requirement["status"] == "finish"
     assert requirement["route_version"] == 1
     assert generator.call_count == 1
     assert business.status_code == 200

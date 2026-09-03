@@ -22,7 +22,7 @@ __all__ = [
 
 HandlerWorker = Callable[[str, str, dict[str, Any]], Any]
 
-_ERROR_RESPONSE = b'{"status":"error"}'
+_ERROR_RESPONSE = b'{"status":"error","message":"generated handler process failed"}'
 _PROCESS_ERROR_MESSAGE = "Generated handler process failed"
 
 
@@ -147,8 +147,11 @@ class ProcessHandlerExecutor:
             except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError):
                 raise HandlerProcessError(_PROCESS_ERROR_MESSAGE) from None
 
-            if response == {"status": "error"}:
-                raise HandlerProcessError(_PROCESS_ERROR_MESSAGE) from None
+            if type(response) is dict and response.get("status") == "error":
+                message = response.get("message")
+                if not isinstance(message, str) or not message:
+                    message = _PROCESS_ERROR_MESSAGE
+                raise HandlerProcessError(message) from None
             if (
                 type(response) is not dict
                 or set(response) != {"status", "result"}
@@ -193,10 +196,15 @@ def _process_main(
         ).encode("utf-8")
         if len(response) > max_result_bytes:
             response = _ERROR_RESPONSE
-    except BaseException:
-        # The parent receives one intentionally generic response. In particular,
-        # multiprocessing must not print a generated-code traceback to stderr.
-        response = _ERROR_RESPONSE
+    except BaseException as exc:
+        # Do not print generated-code tracebacks to stderr or return exception
+        # messages, which could include request values. The exception class still
+        # gives clients an actionable, non-secret failure category.
+        response = json.dumps(
+            {"status": "error", "message": _safe_worker_error_message(exc)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
 
     try:
         connection.send_bytes(response)
@@ -204,6 +212,14 @@ def _process_main(
         pass
     finally:
         connection.close()
+
+
+def _safe_worker_error_message(exc: BaseException) -> str:
+    """Return a non-secret, specific category for a worker exception."""
+
+    if isinstance(exc, HandlerExecutionError):
+        return str(exc)
+    return f"generated handler raised {type(exc).__name__}"
 
 
 def _apply_resource_limits(

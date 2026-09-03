@@ -66,8 +66,8 @@ def _wait_for_route_task(agent_stack, accepted):
         )
         assert requirement.status_code == 200, requirement.text
         result = api_data(requirement)
-        if result["status"] in {"active", "failed"}:
-            assert result["status"] == "active", result
+        if result["status"] in {"finish", "failed"}:
+            assert result["status"] == "finish", result
             return result
         time.sleep(0.05)
     raise AssertionError(f"route task did not finish: {operation}")
@@ -199,7 +199,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         headers=agent_stack.management_headers,
     )
     assert implemented.status_code == 200, implemented.text
-    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["status"] == "finish"
     assert api_data(implemented)["route_version"] == 1
     assert client.get("/console-hello").json() == {
         "code": 0,
@@ -215,7 +215,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     assert [event["to_status"] for event in api_data(events)] == [
         "draft",
         "implementing",
-        "active",
+        "finish",
     ]
     assert (agent_stack.generated_dir / "runtime-metadata.sqlite3").is_file()
 
@@ -230,7 +230,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     assert restored.status_code == 200
     assert len(api_data(restored)) == 1
     assert api_data(restored)[0]["id"] == requirement_id
-    assert api_data(restored)[0]["status"] == "active"
+    assert api_data(restored)[0]["status"] == "finish"
     assert api_data(restored)[0]["route_version"] == 1
     assert agent_stack.require_client().get("/console-hello").json() == {
         "code": 0,

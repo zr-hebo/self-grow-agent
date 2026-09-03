@@ -79,7 +79,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
 }
 ```
 
-轮询 `data.operation_url`，直到 `data.status` 为 `active`；若为 `failed`，请查看 `data.last_error` 并修改后重试：
+轮询 `data.operation_url`，直到 `data.status` 为 `finish`；若为 `failed`，请查看 `data.last_error` 并修改后重试：
 
 ```bash
 curl "http://127.0.0.1:8000/api/v1/manage/requirements/<requirement-id>" \
@@ -204,7 +204,7 @@ generated/
 本地控制台的需求、当前实现状态、关联路由版本和追加事件保存在
 `METADATA_DB_PATH`。SQLite 使用 WAL 模式，服务重启后仍可继续编辑或迭代需求；若服务在实现过程中退出，尚未发布的需求会在下次启动时标记为失败并允许重试。SQLite 只保存运行元数据，不保存管理密钥或 LLM API Key。
 
-Agent 会在发布路由前把目标版本和源码 SHA-256 写入 SQLite 作为发布回执。若路由已经发布、但最终状态写入被进程退出或短暂锁冲突打断，下一次启动或重复实现请求会校验回执并补齐 `active` 状态，不会再次调用 LLM 或重复升版。仅打开数据库做查询不会触发中断恢复。
+Agent 会在发布路由前把目标版本和源码 SHA-256 写入 SQLite 作为发布回执。若路由已经发布、但最终状态写入被进程退出或短暂锁冲突打断，下一次启动或重复实现请求会校验回执并补齐对外可见的 `finish` 状态，不会再次调用 LLM 或重复升版。仅打开数据库做查询不会触发中断恢复。
 
 ## CI/CD 集成测试
 

@@ -50,7 +50,7 @@ const elements = {
 const statusLabels = {
   draft: "草稿",
   implementing: "实现中",
-  active: "已发布",
+  finish: "已完成",
   failed: "失败",
 };
 

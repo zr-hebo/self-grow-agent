@@ -49,8 +49,8 @@ def handle(request):
     with pytest.raises(HandlerProcessError) as raised:
         executor.execute(source, "broken_v1", {})
 
-    assert str(raised.value) == "Generated handler process failed"
-    assert "ZeroDivisionError" not in str(raised.value)
+    assert str(raised.value) == "generated handler raised ZeroDivisionError"
+    assert "return 1 / 0" not in str(raised.value)
     assert raised.value.__cause__ is None
 
 

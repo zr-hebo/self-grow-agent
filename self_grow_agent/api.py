@@ -97,6 +97,7 @@ _BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
 _BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 ResponseData = TypeVar("ResponseData")
 _logger = logging.getLogger("uvicorn.error")
+_PUBLIC_FINISHED_STATUS = "finish"
 _LOGGED_INSTRUCTION_LIMIT = 1_024
 _SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r"(?P<name>[\"']?(?:password|passwd|token|api[_ -]?key|secret|credential|"
@@ -136,6 +137,12 @@ def _instruction_for_log(instruction: str) -> str:
     if len(redacted) <= _LOGGED_INSTRUCTION_LIMIT:
         return redacted
     return f"{redacted[:_LOGGED_INSTRUCTION_LIMIT]}… [truncated]"
+
+
+def _public_requirement_status(status_value: str) -> str:
+    """Expose completed route-generation work as ``finish`` to API clients."""
+
+    return _PUBLIC_FINISHED_STATUS if status_value == "active" else status_value
 
 
 def _event_time() -> str:
@@ -326,7 +333,7 @@ class RequirementResponse(BaseModel):
             project=record.project,
             route_id=record.route_id,
             route_version=record.route_version,
-            status=record.status,
+            status=_public_requirement_status(record.status),
             last_error=record.last_error,
             created_at=record.created_at,
             updated_at=record.updated_at,
@@ -346,8 +353,12 @@ class RequirementEventResponse(BaseModel):
         return cls(
             id=event.id,
             requirement_id=event.requirement_id,
-            from_status=event.from_status,
-            to_status=event.to_status,
+            from_status=(
+                _public_requirement_status(event.from_status)
+                if event.from_status is not None
+                else None
+            ),
+            to_status=_public_requirement_status(event.to_status),
             message=event.message,
             created_at=event.created_at,
         )
@@ -404,6 +415,15 @@ def _safe_requirement_error(exc: Exception) -> str:
     ):
         return str(exc)
     return "implementation failed"
+
+
+def _safe_handler_error(exc: Exception) -> str:
+    """Return the executor's bounded, non-secret runtime error summary."""
+
+    message = str(exc).strip()
+    if not message:
+        return "dynamic handler failed"
+    return f"dynamic handler failed: {message[:256]}"
 
 
 def _source_sha256(source: str) -> str:
@@ -1096,15 +1116,31 @@ def create_app(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail="dynamic handler timed out",
                 ) from None
-            except HandlerContractError:
+            except HandlerContractError as exc:
+                message = _safe_handler_error(exc)
+                _logger.warning(
+                    "dynamic_route failed route_id=%s method=%s path=%s error=%s",
+                    record.route_id,
+                    request.method,
+                    path,
+                    message,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="dynamic handler returned an invalid response",
+                    detail=message,
                 ) from None
-            except HandlerProcessError:
+            except HandlerProcessError as exc:
+                message = _safe_handler_error(exc)
+                _logger.warning(
+                    "dynamic_route failed route_id=%s method=%s path=%s error=%s",
+                    record.route_id,
+                    request.method,
+                    path,
+                    message,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="dynamic handler failed",
+                    detail=message,
                 ) from None
             except Exception:
                 raise HTTPException(

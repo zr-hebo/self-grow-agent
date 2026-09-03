@@ -346,14 +346,14 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
             )
             assert api_data(in_progress)["status"] in {"draft", "implementing"}
             generator.release.set()
-            for _ in range(10):
+            for _ in range(100):
                 completed = await client.get(
                     operation["operation_url"],
                     headers=management_headers(),
                 )
-                if api_data(completed)["status"] == "active":
+                if api_data(completed)["status"] == "finish":
                     return accepted, completed
-                await asyncio.sleep(0)
+                await asyncio.sleep(0.01)
         raise AssertionError("background route task did not complete")
 
     accepted, completed = asyncio.run(run_scenario())
@@ -366,7 +366,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
         "method": "GET",
         "operation_url": f"/api/v1/manage/requirements/{api_data(completed)['id']}",
     }
-    assert api_data(completed)["status"] == "active"
+    assert api_data(completed)["status"] == "finish"
     assert api_data(completed)["route_id"] == "get-hello"
 
     task_logs = "\n".join(record.getMessage() for record in caplog.records)
@@ -521,7 +521,7 @@ def test_business_response_wraps_null_handler_result(tmp_path: Path) -> None:
     ("error", "expected_status", "expected_detail"),
     [
         (HandlerTimeoutError("timeout"), 504, "dynamic handler timed out"),
-        (HandlerProcessError("failed"), 500, "dynamic handler failed"),
+        (HandlerProcessError("failed"), 500, "dynamic handler failed: failed"),
     ],
 )
 def test_handler_process_failures_are_mapped_to_safe_http_errors(

@@ -232,8 +232,10 @@ def _checked_handler(raw_handler: Callable[[dict[str, Any]], Any]) -> Handler:
         _ensure_json_compatible(request, label="Handler request")
         try:
             result = raw_handler(request)
-        except Exception:
-            raise HandlerExecutionError("Generated handler execution failed") from None
+        except Exception as exc:
+            raise HandlerExecutionError(
+                f"generated handler raised {type(exc).__name__}"
+            ) from None
         _ensure_json_compatible(result, label="Handler result")
         return result
 

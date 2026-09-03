@@ -54,12 +54,12 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
                 headers=stack.management_headers,
             )
             assert completed.status_code == 200, completed.text
-            if api_data(completed)["status"] in {"active", "failed"}:
+            if api_data(completed)["status"] in {"finish", "failed"}:
                 break
             time.sleep(0.05)
         else:
             raise AssertionError(f"Pi route task did not finish: {operation}")
-        assert api_data(completed)["status"] == "active", completed.text
+        assert api_data(completed)["status"] == "finish", completed.text
         assert api_data(completed)["route_id"] == "get-pi-hello"
         response = client.get("/pi-hello")
         assert response.status_code == 200

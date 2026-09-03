@@ -102,7 +102,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
 }
 ```
 
-轮询 `data.operation_url`，直到 `data.status` 为 `active`。若状态为 `failed`，查看 `data.last_error` 并调整需求后重试：
+轮询 `data.operation_url`，直到 `data.status` 为 `finish`。若状态为 `failed`，查看 `data.last_error` 并调整需求后重试：
 
 ```bash
 curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
@@ -247,7 +247,7 @@ curl -sS 'http://127.0.0.1:8000/healthz'
 SQLite、浏览器存储或日志；刷新页面后需要重新输入。所有需求和实现接口仍由
 `X-Management-Key` 保护，因此 `/console` 本身可打开并不代表管理数据可匿名读取。
 
-典型流程是：输入需求名称、项目分组、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。状态会依次变为 `draft`、`implementing`、`active`；失败时记录安全的错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本和项目的需求，成功后版本自动递增。
+典型流程是：输入需求名称、项目分组、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。对外状态会依次变为 `draft`、`implementing`、`finish`；`finish` 表示生成、校验和热加载已完成，已发布路由可继续调用。失败时记录安全的错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本和项目的需求，成功后版本自动递增。
 
 如果同一路由后来通过其他需求或管理 API 升级，控制台会同时显示“当前版本”和“需求基线”，并出现“同步最新版本”按钮。这个 rebase 必须由用户显式确认，避免静默覆盖其他更新；同步后再生成会基于最新源码继续开发。
 
@@ -333,7 +333,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
 }
 ```
 
-`data.operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`data.status=accepted` 只表示服务已接收任务。通过 `data.operation_url` 轮询，直到返回中的 `data.status` 变为 `active`；若变为 `failed`，可读取安全的 `data.last_error` 摘要。
+`data.operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`data.status=accepted` 只表示服务已接收任务。通过 `data.operation_url` 轮询，直到返回中的 `data.status` 变为 `finish`；若变为 `failed`，可读取安全的 `data.last_error` 摘要。
 
 例如，使用响应中的实际任务 ID 查询：
 
@@ -342,7 +342,7 @@ curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
-任务状态为 `active` 后，路由已经生效，可以调用：
+任务状态为 `finish` 后，路由已经生效，可以调用：
 
 ```bash
 curl -sS "$AGENT_URL/hello"
@@ -473,7 +473,7 @@ LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和�
 | `422` | 具体的路径、方法或代码校验错误 | 路径无效、路径被保留、方法不支持，或者 LLM 生成了不符合安全规则的源码；缩小并明确指令后重试。 |
 | `429` | `dynamic handler capacity is full` | 同时运行的处理器达到 `MAX_CONCURRENT_HANDLERS`，且等待超过 `HANDLER_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `429` | `generation capacity is full` | Pi 进程达到 `PI_MAX_CONCURRENT_RUNS`，且等待超过 `PI_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
-| `500` | `dynamic handler failed` 或 `dynamic handler returned an invalid response` | 处理器运行失败或返回值不符合 JSON 契约；通过管理 API 生成更简单的完整替代版本。 |
+| `500` | `dynamic handler failed: generated handler raised ZeroDivisionError` 等安全摘要 | 处理器运行失败或返回值不符合 JSON 契约；会返回异常类别但不包含请求值、源码或堆栈。对于数据库、网络和子进程等受限能力，请实现受控后端能力，而不是放进动态处理器。 |
 | `502` | `LLM generation failed` | LLM 请求、严格结构化输出解析或上游服务失败；检查 API Key、Base URL、模型及 LLM 服务日志。 |
 | `503` | `LLM is not configured` | `LLM_API_KEY` 为空，或者 `.env` 没有被导入当前 shell。 |
 | `503` | `route publication failed` | `GENERATED_DIR` 无法写入或持久化失败；检查目录权限和磁盘状态。 |
