@@ -10,7 +10,7 @@ import pytest
 from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.pi_generator import PiFeatureGenerator
-from self_grow_agent.pi_rpc import PiRpcError
+from self_grow_agent.pi_rpc import PiRpcError, PiRpcProtocolError
 
 SOURCE = 'def handle(request):\n    return {"message": "hello"}\n'
 RESULT_JSON = json.dumps({"source": SOURCE, "description": "greeting"})
@@ -167,6 +167,19 @@ def test_generate_wraps_rpc_error_without_exposing_provider_details() -> None:
 
     assert provider_detail not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
+
+
+def test_generate_preserves_safe_protocol_diagnostic() -> None:
+    class FailingPiRpcClient:
+        async def run(self, prompt: str) -> None:
+            raise PiRpcProtocolError("Pi RPC emitted invalid JSON")
+
+    generator = PiFeatureGenerator(rpc_client=FailingPiRpcClient(), max_concurrent_runs=1)
+
+    with pytest.raises(GenerationError, match="Pi RPC emitted invalid JSON"):
+        asyncio.run(
+            generator.generate(instruction="Say hello", path="/hello", method="GET")
+        )
 
 
 def test_generate_limits_concurrent_rpc_runs() -> None:
