@@ -115,8 +115,8 @@ def load_settings() -> Settings:
         port=int(environ.get("PORT", "8000")),
         management_api_key=environ.get("MANAGEMENT_API_KEY", ""),
         llm_api_key=environ.get("LLM_API_KEY", ""),
-        llm_base_url=environ.get("LLM_BASE_URL", "https://api.openai.com/v1"),
-        llm_model=environ.get("LLM_MODEL", "gpt-5-mini"),
+        llm_base_url=environ.get("LLM_BASE_URL", "https://api.deepseek.com"),
+        llm_model=environ.get("LLM_MODEL", "deepseek-v4-flash"),
         llm_timeout_seconds=float(environ.get("LLM_TIMEOUT_SECONDS", "30")),
         generated_dir=generated_dir,
         metadata_db_path=Path(

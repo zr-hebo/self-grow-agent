@@ -124,8 +124,8 @@ export LLM_TIMEOUT_SECONDS='30'
 |---|---|---|
 | `MANAGEMENT_API_KEY` | 空 | 管理 API 的 `X-Management-Key`。非空时至少 16 个字符；为空时所有管理请求都会被拒绝。 |
 | `LLM_API_KEY` | 空 | LLM 凭据。为空时已有动态路由仍能运行，但创建和更新请求返回 `503`。 |
-| `LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI Responses API 兼容服务的基础地址。 |
-| `LLM_MODEL` | `gpt-5-mini` | 用于生成处理器的模型名称。 |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek Responses API 的基础地址；可覆盖为其他兼容服务。 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 用于生成处理器的默认 DeepSeek 模型。 |
 | `LLM_TIMEOUT_SECONDS` | `30` | 调用 LLM 的超时时间，单位为秒。 |
 
 这些变量会在导入 `main.py` 时读取为当前进程的配置快照。修改 LLM、监听地址或运行限制后，需要重启 Agent；通过管理 API 发布动态处理器则不需要重启。

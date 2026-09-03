@@ -108,6 +108,8 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     settings = load_settings()
 
     assert settings.llm_api_key == ""
+    assert settings.llm_base_url == "https://api.deepseek.com"
+    assert settings.llm_model == "deepseek-v4-flash"
     assert settings.management_api_key == ""
     assert settings.host
     assert settings.port > 0
@@ -156,7 +158,7 @@ def test_settings_reject_unsafe_values(field: str, value: object) -> None:
         "port": 8000,
         "management_api_key": MANAGEMENT_KEY,
         "llm_api_key": "",
-        "llm_base_url": "https://api.openai.com/v1",
+        "llm_base_url": "https://api.deepseek.com",
         "llm_model": "test-model",
         "llm_timeout_seconds": 30.0,
         "generated_dir": Path("generated"),

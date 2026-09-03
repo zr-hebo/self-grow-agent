@@ -149,8 +149,8 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `PORT` | `8000` | 服务端口 |
 | `MANAGEMENT_API_KEY` | 空 | 至少 16 字符；为空时所有管理请求均拒绝 |
 | `LLM_API_KEY` | 空 | LLM 密钥；为空时业务路由仍可恢复和运行，但生成请求返回 `503` |
-| `LLM_BASE_URL` | `https://api.openai.com/v1` | OpenAI Responses API 兼容地址 |
-| `LLM_MODEL` | `gpt-5-mini` | 生成处理器所用模型 |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek Responses API 地址；可覆盖为其他兼容地址 |
+| `LLM_MODEL` | `deepseek-v4-flash` | 默认生成处理器所用的 DeepSeek 模型 |
 | `LLM_TIMEOUT_SECONDS` | `30` | LLM 请求超时秒数 |
 | `GENERATION_BACKEND` | `direct` | 处理器生成后端：`direct` 或 `pi` |
 | `PI_EXECUTABLE` | `pi` | Pi CLI 可执行文件路径 |
