@@ -11,7 +11,7 @@
 
 每个动态 API 还带有 `project` 逻辑分组。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名；控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。项目是逻辑分组，不是 URL 命名空间，因此跨项目也不能重复使用相同的 HTTP 方法和路径；升级前的路由与需求会归入 `default`。
 
-管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。发布新版本时，运行时会先生成、校验和试加载完整处理器，再在锁内原子替换不可变路由记录。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；操作系统支持时还会限制内存与 CPU。
+管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。直接创建路由会先在 SQLite 保存一个需求任务并返回 `202 Accepted`，LLM 在后台生成、校验和热加载；可轮询任务状态，避免管理请求长时间占用连接。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；操作系统支持时还会限制内存与 CPU。
 
 完整的 LLM 配置、启动步骤、自动创建和热更新示例，请参阅 [使用指南](docs/USAGE.md)。
 
@@ -62,20 +62,27 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
   }'
 ```
 
-成功响应表示路由已经激活：
+成功响应为 HTTP `202 Accepted`，表示后台任务已保存并开始执行（不是路由已经激活）：
 
 ```json
 {
-  "route_id": "get-hello",
+  "operation_id": "<requirement-id>",
+  "status": "accepted",
+  "project": "quickstart",
   "path": "/hello",
   "method": "GET",
-  "project": "quickstart",
-  "version": 1,
-  "description": "Say hello"
+  "operation_url": "/api/v1/manage/requirements/<requirement-id>"
 }
 ```
 
-立即调用业务 API：
+轮询 `operation_url`，直到 `status` 为 `active`；若为 `failed`，请查看 `last_error` 并修改后重试：
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/manage/requirements/<requirement-id>" \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY"
+```
+
+任务激活后调用业务 API：
 
 ```bash
 curl 'http://127.0.0.1:8000/hello'
@@ -117,9 +124,10 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `GET` | `/healthz` | 健康检查 |
 | `GET` | `/console` | 本地需求开发控制台 |
 | `GET` | `/api/v1/manage/routes?project={project}` | 列出动态路由，可按项目筛选 |
-| `POST` | `/api/v1/manage/routes` | 通过 LLM 创建动态路由 |
+| `POST` | `/api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 |
 | `PUT` | `/api/v1/manage/routes/{route_id}` | 通过 LLM 更新动态路由 |
 | `GET/POST` | `/api/v1/manage/requirements?project={project}` | 列出或保存 SQLite 需求元数据，可按项目筛选 |
+| `GET` | `/api/v1/manage/requirements/{id}` | 查询后台路由任务或需求的当前状态 |
 | `PATCH` | `/api/v1/manage/requirements/{id}` | 编辑需求草稿 |
 | `POST` | `/api/v1/manage/requirements/{id}/implement` | 生成、校验并发布需求 |
 | `POST` | `/api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from cicd_case.conftest import LLM_API_KEY, MANAGEMENT_KEY, AgentStack
@@ -37,8 +38,22 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
             },
         )
 
-        assert created.status_code == 201, created.text
-        assert created.json()["description"] == "CICD Pi handler"
+        assert created.status_code == 202, created.text
+        operation = created.json()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            completed = client.get(
+                operation["operation_url"],
+                headers=stack.management_headers,
+            )
+            assert completed.status_code == 200, completed.text
+            if completed.json()["status"] in {"active", "failed"}:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"Pi route task did not finish: {operation}")
+        assert completed.json()["status"] == "active", completed.text
+        assert completed.json()["route_id"] == "get-pi-hello"
         response = client.get("/pi-hello")
         assert response.status_code == 200
         assert response.json() == {

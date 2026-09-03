@@ -76,6 +76,26 @@ class FakeFeatureGenerator:
         return result
 
 
+class AsyncBlockingFeatureGenerator:
+    def __init__(self, result: GeneratedHandler) -> None:
+        self._result = result
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def generate(
+        self,
+        *,
+        instruction: str,
+        path: str,
+        method: str,
+        current_source: str | None = None,
+    ) -> GeneratedHandler:
+        del instruction, path, method, current_source
+        self.started.set()
+        await self.release.wait()
+        return self._result
+
+
 class InlineHandlerExecutor:
     def execute(self, source: str, module_name: str, request: dict) -> object:
         return GeneratedCodeLoader().load(source, module_name)(request)
@@ -161,6 +181,7 @@ def create_test_app(
         generator=generator,
         runtime=runtime,
         handler_executor=InlineHandlerExecutor(),
+        async_route_creation=False,
     )
 
 
@@ -267,6 +288,67 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
     }
     assert generator.calls[0]["path"] == "/hello"
     assert generator.calls[0]["method"] == "GET"
+
+
+def test_create_route_returns_an_accepted_task_before_generation_finishes(
+    tmp_path: Path,
+) -> None:
+    generator = AsyncBlockingFeatureGenerator(
+        GeneratedHandler(source='def handle(request):\n    return {"message": "hello"}\n')
+    )
+    app = build_app(
+        settings=make_settings(tmp_path),
+        generator=generator,
+        handler_executor=InlineHandlerExecutor(),
+    )
+
+    async def run_scenario() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            accepted = await client.post(
+                "/api/v1/manage/routes",
+                headers=management_headers(),
+                json={
+                    "path": "/hello",
+                    "method": "GET",
+                    "project": "demo",
+                    "instruction": "Return hello",
+                },
+            )
+            assert accepted.status_code == 202
+            assert await asyncio.wait_for(generator.started.wait(), timeout=1)
+            operation = accepted.json()
+            in_progress = await client.get(
+                operation["operation_url"],
+                headers=management_headers(),
+            )
+            assert in_progress.json()["status"] in {"draft", "implementing"}
+            generator.release.set()
+            for _ in range(10):
+                completed = await client.get(
+                    operation["operation_url"],
+                    headers=management_headers(),
+                )
+                if completed.json()["status"] == "active":
+                    return accepted, completed
+                await asyncio.sleep(0)
+        raise AssertionError("background route task did not complete")
+
+    accepted, completed = asyncio.run(run_scenario())
+
+    assert accepted.json() == {
+        "operation_id": completed.json()["id"],
+        "status": "accepted",
+        "project": "demo",
+        "path": "/hello",
+        "method": "GET",
+        "operation_url": f"/api/v1/manage/requirements/{completed.json()['id']}",
+    }
+    assert completed.json()["status"] == "active"
+    assert completed.json()["route_id"] == "get-hello"
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:

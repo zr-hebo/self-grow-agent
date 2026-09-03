@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 HELLO_V1 = 'def handle(request):\n    return {"message": "hello v1"}\n'
@@ -33,6 +34,28 @@ def _create_hello(agent_stack, source: str = HELLO_V1):
             "instruction": "Return the CICD hello message",
         },
     )
+
+
+def _wait_for_route_task(agent_stack, accepted):
+    """Poll a direct-route receipt until its background implementation finishes."""
+
+    assert accepted.status_code == 202, accepted.text
+    operation = accepted.json()
+    assert operation["status"] == "accepted"
+    deadline = time.monotonic() + 10
+    client = agent_stack.require_client()
+    while time.monotonic() < deadline:
+        requirement = client.get(
+            operation["operation_url"],
+            headers=agent_stack.management_headers,
+        )
+        assert requirement.status_code == 200, requirement.text
+        result = requirement.json()
+        if result["status"] in {"active", "failed"}:
+            assert result["status"] == "active", result
+            return result
+        time.sleep(0.05)
+    raise AssertionError(f"route task did not finish: {operation}")
 
 
 def _update_hello(agent_stack, *, source: str, expected_version: int):
@@ -65,17 +88,21 @@ def test_management_auth(agent_stack) -> None:
 
 
 def test_dynamic_hello_create(agent_stack) -> None:
-    created = _create_hello(agent_stack)
+    accepted = _create_hello(agent_stack)
 
-    assert created.status_code == 201, created.text
-    assert created.json() == {
-        "route_id": "get-hello",
+    assert accepted.status_code == 202, accepted.text
+    operation = accepted.json()
+    assert operation == {
+        "operation_id": operation["operation_id"],
+        "status": "accepted",
+        "project": "default",
         "path": "/hello",
         "method": "GET",
-        "project": "default",
-        "version": 1,
-        "description": "CICD hello handler",
+        "operation_url": f"/api/v1/manage/requirements/{operation['operation_id']}",
     }
+    completed = _wait_for_route_task(agent_stack, accepted)
+    assert completed["route_id"] == "get-hello"
+    assert completed["route_version"] == 1
     hello = agent_stack.require_client().get("/hello")
     assert hello.status_code == 200
     assert hello.json() == {
@@ -97,7 +124,7 @@ def test_concurrent_business_requests(agent_stack) -> None:
             "instruction": "Echo the request_id query parameter",
         },
     )
-    assert created.status_code == 201, created.text
+    _wait_for_route_task(agent_stack, created)
 
     request_ids = [f"request-{index}" for index in range(8)]
     start_barrier = threading.Barrier(len(request_ids))
@@ -199,7 +226,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
 
 def test_hot_reload_update(agent_stack) -> None:
     created = _create_hello(agent_stack)
-    assert created.status_code == 201, created.text
+    _wait_for_route_task(agent_stack, created)
     original_pid = agent_stack.pid
 
     updated = _update_hello(agent_stack, source=HELLO_V2, expected_version=1)
@@ -242,7 +269,7 @@ def test_hot_reload_update(agent_stack) -> None:
 
 def test_failed_update_rollback(agent_stack) -> None:
     created = _create_hello(agent_stack)
-    assert created.status_code == 201, created.text
+    _wait_for_route_task(agent_stack, created)
     updated = _update_hello(agent_stack, source=HELLO_V2, expected_version=1)
     assert updated.status_code == 200, updated.text
 
@@ -269,7 +296,7 @@ def test_failed_update_rollback(agent_stack) -> None:
 
 def test_restart_recovery(agent_stack) -> None:
     created = _create_hello(agent_stack)
-    assert created.status_code == 201, created.text
+    _wait_for_route_task(agent_stack, created)
     updated = _update_hello(agent_stack, source=HELLO_V2, expected_version=1)
     assert updated.status_code == 200, updated.text
     original_pid = agent_stack.pid

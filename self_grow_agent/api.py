@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -238,6 +238,17 @@ class RouteResponse(BaseModel):
         )
 
 
+class RouteTaskResponse(BaseModel):
+    """Receipt for a route-generation task accepted for background execution."""
+
+    operation_id: str
+    status: str = "accepted"
+    project: str
+    path: str
+    method: str
+    operation_url: str
+
+
 class RequirementResponse(BaseModel):
     id: str
     title: str
@@ -347,6 +358,12 @@ def _source_sha256(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
+def _route_requirement_title(project: str, method: str, path: str) -> str:
+    """Return a deterministic, bounded title for a direct route request."""
+
+    return f"{project}: {method} {path}"[:120]
+
+
 def _active_publications(runtime: RouteRuntime) -> dict[str, tuple[int, str]]:
     return {
         route.route_id: (route.version, _source_sha256(route.source))
@@ -362,6 +379,7 @@ def create_app(
     handler_executor: HandlerExecutor | None = None,
     requirement_store: RequirementStore | None = None,
     lifespan: Any | None = None,
+    async_route_creation: bool = True,
 ) -> FastAPI:
     """Build one application instance, allowing deterministic dependency injection."""
 
@@ -570,19 +588,52 @@ def create_app(
 
     @app.post(
         "/api/v1/manage/routes",
-        response_model=RouteResponse,
-        status_code=status.HTTP_201_CREATED,
+        response_model=RouteTaskResponse | RouteResponse,
+        status_code=status.HTTP_202_ACCEPTED,
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def create_route(payload: CreateRouteRequest) -> RouteResponse:
-        record = await service.create_route(
-            path=payload.path,
-            method=payload.method,
-            project=payload.project,
-            instruction=payload.instruction,
+    async def create_route(
+        payload: CreateRouteRequest,
+        response: Response,
+    ) -> RouteTaskResponse | RouteResponse:
+        if not async_route_creation:
+            record = await service.create_route(
+                path=payload.path,
+                method=payload.method,
+                project=payload.project,
+                instruction=payload.instruction,
+            )
+            response.status_code = status.HTTP_201_CREATED
+            return RouteResponse.from_record(record)
+
+        if active_generator is None:
+            raise LLMUnavailableError("LLM is not configured")
+        normalized_path, normalized_method = active_runtime.validate_route(
+            payload.path,
+            payload.method,
         )
-        return RouteResponse.from_record(record)
+        if active_runtime.resolve(normalized_method, normalized_path) is not None:
+            raise RouteAlreadyExistsError(
+                f"route {normalized_method} {normalized_path} already exists"
+            )
+        requirement = await asyncio.to_thread(
+            active_requirement_store.create,
+            _route_requirement_title(payload.project, normalized_method, normalized_path),
+            payload.instruction,
+            normalized_path,
+            normalized_method,
+            project=payload.project,
+        )
+        task = asyncio.create_task(run_requirement_implementation(requirement.id))
+        task.add_done_callback(consume_implementation_result)
+        return RouteTaskResponse(
+            operation_id=requirement.id,
+            project=requirement.project,
+            path=requirement.path,
+            method=requirement.method,
+            operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+        )
 
     @app.put(
         "/api/v1/manage/routes/{route_id}",
@@ -676,6 +727,16 @@ def create_app(
             title=payload.title,
             instruction=payload.instruction,
         )
+        return RequirementResponse.from_record(record)
+
+    @app.get(
+        "/api/v1/manage/requirements/{requirement_id}",
+        response_model=RequirementResponse,
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def get_requirement(requirement_id: str) -> RequirementResponse:
+        record = await asyncio.to_thread(active_requirement_store.get, requirement_id)
         return RequirementResponse.from_record(record)
 
     @app.get(

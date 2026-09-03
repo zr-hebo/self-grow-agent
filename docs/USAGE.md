@@ -85,7 +85,27 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   }'
 ```
 
-成功时返回 HTTP `201`；Agent 会校验生成的处理器、写入本地运行数据并热加载路由，无需重启服务。随后即可访问刚刚创建的功能：
+成功时先返回 HTTP `202 Accepted`，其中 `operation_id` 是 SQLite 持久化的后台任务 ID，`operation_url` 可用于查询状态。LLM 的生成、校验和热加载在后台继续执行，因此这次管理请求不会一直等待模型完成：
+
+```json
+{
+  "operation_id":"<requirement-id>",
+  "status":"accepted",
+  "project":"quickstart",
+  "path":"/hello",
+  "method":"GET",
+  "operation_url":"/api/v1/manage/requirements/<requirement-id>"
+}
+```
+
+轮询该 URL，直到 `status` 为 `active`。若状态为 `failed`，查看 `last_error` 并调整需求后重试：
+
+```bash
+curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY"
+```
+
+任务激活后即可访问刚刚创建的功能：
 
 ```bash
 curl -sS "$AGENT_URL/hello"
@@ -234,9 +254,10 @@ Agent 把 API 分为两个平面：
 | 平面 | 路径 | 作用 | 鉴权 |
 |---|---|---|---|
 | 管理面 | `GET /api/v1/manage/routes?project={project}` | 查看动态路由，可按项目筛选 | 必须提供 `X-Management-Key` |
-| 管理面 | `POST /api/v1/manage/routes` | 让 LLM 创建动态路由 | 必须提供 `X-Management-Key` |
+| 管理面 | `POST /api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 | 必须提供 `X-Management-Key` |
 | 管理面 | `PUT /api/v1/manage/routes/{route_id}` | 让 LLM 替换现有路由逻辑 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET/POST /api/v1/manage/requirements?project={project}` | 列出或保存开发需求，可按项目筛选 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET /api/v1/manage/requirements/{id}` | 查询一个后台路由任务或需求状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `PATCH /api/v1/manage/requirements/{id}` | 编辑需求内容 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/implement` | 实现需求并关联路由版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 | 必须提供 `X-Management-Key` |
@@ -291,22 +312,29 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   }'
 ```
 
-创建成功返回 HTTP `201`。响应只包含以下六个字段，不会返回生成的源码：
+创建成功立即返回 HTTP `202 Accepted`。响应只包含以下六个字段，不会返回生成的源码或等待 LLM 完成：
 
 ```json
 {
-  "route_id": "get-hello",
+  "operation_id": "<requirement-id>",
+  "status": "accepted",
+  "project": "demo",
   "path": "/hello",
   "method": "GET",
-  "project": "demo",
-  "version": 1,
-  "description": "Say hello"
+  "operation_url": "/api/v1/manage/requirements/<requirement-id>"
 }
 ```
 
-`route_id`、路径、方法和版本由运行时确定；`description` 来自 LLM，因此实际措辞可能与示例略有不同。
+`operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`status=accepted` 只表示服务已接收任务。通过 `operation_url` 轮询，直到返回中的 `status` 变为 `active`；若变为 `failed`，可读取安全的 `last_error` 摘要。
 
-创建响应返回后，路由已经生效，可以立即调用：
+例如，使用响应中的实际任务 ID 查询：
+
+```bash
+curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY"
+```
+
+任务状态为 `active` 后，路由已经生效，可以调用：
 
 ```bash
 curl -sS "$AGENT_URL/hello"
