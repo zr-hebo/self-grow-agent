@@ -252,7 +252,11 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
         "version": 1,
         "description": "Say hello",
     }
-    assert client.get("/hello").json() == {"message": "hello"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello"},
+    }
     assert generator.calls[0]["path"] == "/hello"
     assert generator.calls[0]["method"] == "GET"
 
@@ -274,7 +278,11 @@ def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert len(created.json()["route_id"]) <= 64
-    assert client.get(path).json() == {"ok": True}
+    assert client.get(path).json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"ok": True},
+    }
 
 
 def test_new_app_instance_recovers_real_generated_handler(tmp_path: Path) -> None:
@@ -296,7 +304,11 @@ def test_new_app_instance_recovers_real_generated_handler(tmp_path: Path) -> Non
 
     restarted_client = TestClient(create_test_app(settings=settings, generator=None))
 
-    assert restarted_client.get("/hello").json() == {"message": "restored"}
+    assert restarted_client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "restored"},
+    }
 
 
 def test_default_app_executes_business_handler_in_subprocess(tmp_path: Path) -> None:
@@ -314,7 +326,27 @@ def test_default_app_executes_business_handler_in_subprocess(tmp_path: Path) -> 
     response = client.get("/isolated")
 
     assert response.status_code == 200
-    assert response.json() == {"message": "isolated"}
+    assert response.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "isolated"},
+    }
+
+
+def test_business_response_wraps_null_handler_result(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    runtime.create(
+        "/empty",
+        "GET",
+        "def handle(request):\n    return None\n",
+    )
+    client = TestClient(build_app(settings=settings, generator=None, runtime=runtime))
+
+    response = client.get("/empty")
+
+    assert response.status_code == 200
+    assert response.json() == {"code": 0, "message": "OK", "data": None}
 
 
 @pytest.mark.parametrize(
@@ -436,8 +468,8 @@ def test_handler_capacity_allows_configured_calls_to_run_concurrently(
 
     assert [response.status_code for response in responses] == [200, 200]
     assert [response.json() for response in responses] == [
-        {"ok": True},
-        {"ok": True},
+        {"code": 0, "message": "OK", "data": {"ok": True}},
+        {"code": 0, "message": "OK", "data": {"ok": True}},
     ]
 
 
@@ -496,7 +528,11 @@ def test_cancelled_request_keeps_capacity_until_background_handler_finishes(
     assert rejected.headers["Retry-After"] == "1"
     assert calls_before_release == 1
     assert recovered.status_code == 200
-    assert recovered.json() == {"call": 2}
+    assert recovered.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"call": 2},
+    }
 
 
 def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> None:
@@ -530,7 +566,11 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
 
     assert updated.status_code == 200
     assert updated.json()["version"] == 2
-    assert client.get("/hello?name=Tom").json() == {"message": "hello Tom"}
+    assert client.get("/hello?name=Tom").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello Tom"},
+    }
     assert generator.calls[1]["current_source"] == first.source
 
     stale = client.put(
@@ -563,7 +603,11 @@ def test_post_business_route_receives_json_body(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert response.status_code == 200
-    assert response.json() == {"received": {"name": "Tom"}}
+    assert response.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"received": {"name": "Tom"}},
+    }
 
 
 def test_json_suffix_media_type_is_parsed_as_json(tmp_path: Path) -> None:
@@ -593,7 +637,11 @@ def test_json_suffix_media_type_is_parsed_as_json(tmp_path: Path) -> None:
         headers={"Content-Type": "application/merge-patch+json"},
     )
 
-    assert response.json() == {"received": {"name": "Tom"}}
+    assert response.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"received": {"name": "Tom"}},
+    }
 
 
 def test_dynamic_request_body_limit_is_enforced(tmp_path: Path) -> None:
@@ -643,7 +691,7 @@ def test_sensitive_headers_are_not_exposed_to_generated_handler(tmp_path: Path) 
         },
     )
 
-    headers = response.json()
+    headers = response.json()["data"]
     assert headers["x-request-id"] == "visible"
     assert "authorization" not in headers
     assert "cookie" not in headers
@@ -693,7 +741,11 @@ def test_invalid_generated_update_keeps_old_handler(tmp_path: Path) -> None:
     )
 
     assert rejected.status_code == 422
-    assert client.get("/hello").json() == {"message": "old"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "old"},
+    }
 
 
 def test_create_conflict_and_route_listing(tmp_path: Path) -> None:

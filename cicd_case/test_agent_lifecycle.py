@@ -77,7 +77,11 @@ def test_dynamic_hello_create(agent_stack) -> None:
     }
     hello = agent_stack.require_client().get("/hello")
     assert hello.status_code == 200
-    assert hello.json() == {"message": "hello v1"}
+    assert hello.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello v1"},
+    }
     assert len(agent_stack.stub.requests) == 1
 
 
@@ -111,7 +115,11 @@ def test_concurrent_business_requests(agent_stack) -> None:
 
     for request_id, response in results:
         assert response.status_code == 200, response.text
-        assert response.json() == {"request_id": request_id}
+        assert response.json() == {
+            "code": 0,
+            "message": "OK",
+            "data": {"request_id": request_id},
+        }
 
     health = client.get("/healthz")
     assert health.status_code == 200
@@ -147,7 +155,11 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     assert implemented.status_code == 200, implemented.text
     assert implemented.json()["status"] == "active"
     assert implemented.json()["route_version"] == 1
-    assert client.get("/console-hello").json() == {"message": "hello v1"}
+    assert client.get("/console-hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello v1"},
+    }
 
     events = client.get(
         f"/api/v1/manage/requirements/{requirement_id}/events",
@@ -175,7 +187,9 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     assert restored.json()[0]["status"] == "active"
     assert restored.json()[0]["route_version"] == 1
     assert agent_stack.require_client().get("/console-hello").json() == {
-        "message": "hello v1"
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello v1"},
     }
 
 
@@ -191,9 +205,17 @@ def test_hot_reload_update(agent_stack) -> None:
     immediate = agent_stack.require_client().get("/hello", params={"name": "Codex"})
     default = agent_stack.require_client().get("/hello")
     assert immediate.status_code == 200
-    assert immediate.json() == {"message": "hello Codex v2"}
+    assert immediate.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello Codex v2"},
+    }
     assert default.status_code == 200
-    assert default.json() == {"message": "hello world v2"}
+    assert default.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello world v2"},
+    }
     assert agent_stack.pid == original_pid
     assert len(agent_stack.stub.requests) == 2
     assert "Current source" in agent_stack.stub.requests[1]["input"]
@@ -207,7 +229,11 @@ def test_hot_reload_update(agent_stack) -> None:
     )
     assert stale.status_code == 409
     assert len(agent_stack.stub.requests) == llm_request_count
-    assert agent_stack.require_client().get("/hello").json() == {"message": "hello world v2"}
+    assert agent_stack.require_client().get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello world v2"},
+    }
 
 
 def test_failed_update_rollback(agent_stack) -> None:
@@ -221,7 +247,11 @@ def test_failed_update_rollback(agent_stack) -> None:
     assert failed.status_code == 422, failed.text
     active = agent_stack.require_client().get("/hello")
     assert active.status_code == 200
-    assert active.json() == {"message": "hello world v2"}
+    assert active.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello world v2"},
+    }
     routes = agent_stack.require_client().get(
         "/api/v1/manage/routes", headers=agent_stack.management_headers
     )
@@ -246,7 +276,11 @@ def test_restart_recovery(agent_stack) -> None:
     assert not agent_stack.stub.running
     restored = agent_stack.require_client().get("/hello", params={"name": "Restart"})
     assert restored.status_code == 200
-    assert restored.json() == {"message": "hello Restart v2"}
+    assert restored.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello Restart v2"},
+    }
     routes = agent_stack.require_client().get(
         "/api/v1/manage/routes", headers=agent_stack.management_headers
     )

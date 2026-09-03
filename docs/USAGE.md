@@ -93,7 +93,7 @@ curl -sS "$AGENT_URL/hello"
 预期响应：
 
 ```json
-{"message":"hello"}
+{"code":0,"message":"OK","data":{"message":"hello"}}
 ```
 
 也可以打开 [本地开发控制台](http://127.0.0.1:8000/console)，输入同一个管理密钥，通过图形界面完成创建、查看和后续迭代。
@@ -242,6 +242,14 @@ Agent 把 API 分为两个平面：
 
 管理面接收自然语言指令并发布代码；业务面只运行已经通过校验并激活的处理器。动态业务路由支持 `GET`、`POST`、`PUT`、`PATCH` 和 `DELETE`，并按 HTTP 方法和标准化后的完整路径精确匹配。
 
+所有业务 API 的成功响应由 Agent 统一封装；生成的 `handle(request)` 返回值始终放在 `data` 中：
+
+```json
+{"code":0,"message":"OK","data":null}
+```
+
+其中 `code` 固定为 `0`，`message` 固定为 `OK`，`data` 可以是对象、数组、字符串、数字、布尔值或 `null`。管理 API 和 `/healthz` 保持各自既有的响应契约；业务失败仍通过对应的 HTTP 状态码和 `detail` 返回。
+
 ## 并发访问业务 API
 
 动态业务请求通过异步分发器并发准入，同步处理器在后台线程和独立子进程中执行，因此不会阻塞服务的事件循环。单个服务进程中的所有动态路由共享以下两个参数：
@@ -296,7 +304,7 @@ curl -sS "$AGENT_URL/hello"
 预期业务响应：
 
 ```json
-{"message":"hello"}
+{"code":0,"message":"OK","data":{"message":"hello"}}
 ```
 
 ## 查看路由并热更新处理逻辑
@@ -356,11 +364,11 @@ curl -sS "$AGENT_URL/hello"
 预期分别返回：
 
 ```json
-{"message":"hello Tom"}
+{"code":0,"message":"OK","data":{"message":"hello Tom"}}
 ```
 
 ```json
-{"message":"hello world"}
+{"code":0,"message":"OK","data":{"message":"hello world"}}
 ```
 
 如果其他管理请求已经抢先更新了该路由，旧的 `expected_version` 会收到 HTTP `409`；重新查询路由列表，使用最新版本决定是否重试，避免无意覆盖他人的更新。
@@ -384,7 +392,7 @@ curl -sS "$AGENT_URL/hello"
 
 把指令写成小而确定的纯数据转换，并明确输入位置、缺省值和预期 JSON 结构。例如：
 
-> 从 `query` 读取 `name`，缺省为 `world`，返回 `{"message": "hello <name>"}`。
+> 从 `query` 读取 `name`，缺省为 `world`，返回 `{"message": "hello <name>"}`。该对象会被 Agent 自动放入业务响应的 `data` 字段。
 
 生成的处理器必须满足以下限制：
 

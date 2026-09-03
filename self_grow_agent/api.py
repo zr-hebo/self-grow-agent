@@ -78,6 +78,7 @@ _CONSOLE_SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 _REQUIREMENT_FINALIZE_ATTEMPTS = 3
+_BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
 
 
 def _required_text(value: str) -> str:
@@ -85,6 +86,12 @@ def _required_text(value: str) -> str:
     if not normalized:
         raise ValueError("must not be blank")
     return normalized
+
+
+def _business_success(data: Any) -> dict[str, Any]:
+    """Wrap a generated-handler result in the public business API envelope."""
+
+    return {**_BUSINESS_SUCCESS_RESPONSE, "data": data}
 
 
 class RequestBodyLimitMiddleware:
@@ -840,7 +847,7 @@ def create_app(
                     context,
                 )
                 execution.add_done_callback(release_handler_slot)
-                return await asyncio.shield(execution)
+                return _business_success(await asyncio.shield(execution))
             except HandlerTimeoutError:
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,

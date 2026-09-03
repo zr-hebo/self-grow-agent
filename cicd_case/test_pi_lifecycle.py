@@ -41,7 +41,11 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
         assert created.json()["description"] == "CICD Pi handler"
         response = client.get("/pi-hello")
         assert response.status_code == 200
-        assert response.json() == {"message": "hello from pi"}
+        assert response.json() == {
+            "code": 0,
+            "message": "OK",
+            "data": {"message": "hello from pi"},
+        }
         assert stack.stub.requests == []
         assert not workspace_root.exists() or list(workspace_root.iterdir()) == []
         assert LLM_API_KEY not in stack.service_log_path.read_text(

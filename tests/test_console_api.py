@@ -329,7 +329,11 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
     assert implemented.json()["status"] == "active"
     assert implemented.json()["route_id"] == "get-hello"
     assert implemented.json()["route_version"] == 1
-    assert client.get("/hello").json() == {"message": "hello-v1"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello-v1"},
+    }
 
     reopened_store = RequirementStore(settings.metadata_db_path)
     persisted_active = reopened_store.get(requirement_id)
@@ -381,7 +385,11 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
     assert second_implementation.status_code == 200
     assert second_implementation.json()["status"] == "active"
     assert second_implementation.json()["route_version"] == 2
-    assert client.get("/hello").json() == {"message": "hello-v2"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello-v2"},
+    }
     assert generator.calls[1]["current_source"] == first_source
     assert RequirementStore(settings.metadata_db_path).get(requirement_id).route_version == 2
 
@@ -428,7 +436,11 @@ def test_requirement_linked_to_an_existing_route_updates_that_route(
     assert implemented.status_code == 200
     assert implemented.json()["route_id"] == existing.route_id
     assert implemented.json()["route_version"] == 2
-    assert client.get("/hello").json() == {"message": "improved"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "improved"},
+    }
     assert generator.calls == [
         {
             "instruction": "Improve the existing greeting",
@@ -495,7 +507,11 @@ def test_requirement_can_rebase_after_route_is_updated_directly(
     assert implemented.status_code == 200
     assert implemented.json()["status"] == "active"
     assert implemented.json()["route_version"] == 3
-    assert client.get("/hello").json() == {"message": "requirement-v3"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "requirement-v3"},
+    }
     assert generator.calls == [
         {
             "instruction": "Update the route directly",
@@ -542,7 +558,11 @@ def test_transient_completion_conflict_is_retried_without_regenerating(
     assert implemented.json()["route_version"] == 1
     assert store.complete_attempts == 2
     assert len(generator.calls) == 1
-    assert client.get("/hello").json() == {"message": "hello"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello"},
+    }
 
 
 def test_published_receipt_is_reconciled_without_regenerating(
@@ -578,7 +598,11 @@ def test_published_receipt_is_reconciled_without_regenerating(
 
     assert interrupted.status_code == 409
     assert store.get(requirement_id).status == "implementing"
-    assert client.get("/hello").json() == {"message": "hello"}
+    assert client.get("/hello").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello"},
+    }
     assert len(generator.calls) == 1
 
     monkeypatch.setattr(store, "complete_implementation", actual_complete)
@@ -655,7 +679,11 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
     assert requirement["route_version"] == 1
     assert generator.call_count == 1
     assert business.status_code == 200
-    assert business.json() == {"message": "hello"}
+    assert business.json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"message": "hello"},
+    }
 
 
 def test_llm_failure_persists_only_a_safe_requirement_error(tmp_path: Path) -> None:
