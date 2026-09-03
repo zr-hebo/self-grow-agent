@@ -21,6 +21,7 @@ const elements = {
   requirementId: document.querySelector("#requirement-id"),
   linkedRouteId: document.querySelector("#linked-route-id"),
   requirementTitle: document.querySelector("#requirement-title"),
+  routeProject: document.querySelector("#route-project"),
   routeMethod: document.querySelector("#route-method"),
   routePath: document.querySelector("#route-path"),
   requirementInstruction: document.querySelector("#requirement-instruction"),
@@ -152,7 +153,8 @@ async function checkHealth() {
   try {
     const response = await fetch("/healthz", {cache: "no-store"});
     const payload = await parseResponse(response);
-    setHealth(payload.status === "ok", payload.status === "ok" ? "运行时在线" : "运行时异常");
+    const health = payload.data;
+    setHealth(health?.status === "ok", health?.status === "ok" ? "运行时在线" : "运行时异常");
   } catch (_error) {
     setHealth(false, "运行时离线");
   }
@@ -190,8 +192,8 @@ function renderRequirements() {
     const top = createElement("span", "card-topline");
     top.append(createElement("strong", "", requirement.title), statusChip(requirement.status));
     const route = requirement.route_id
-      ? `${requirement.method} ${requirement.path} · v${requirement.route_version}`
-      : `${requirement.method} ${requirement.path} · 未发布`;
+      ? `[${requirement.project}] ${requirement.method} ${requirement.path} · v${requirement.route_version}`
+      : `[${requirement.project}] ${requirement.method} ${requirement.path} · 未发布`;
     button.append(top, createElement("small", "", route));
     button.addEventListener("click", () => selectRequirement(requirement.id));
     elements.requirementList.append(button);
@@ -211,7 +213,12 @@ function renderRoutes() {
     return;
   }
 
+  let currentProject = null;
   for (const route of state.routes) {
+    if (route.project !== currentProject) {
+      currentProject = route.project;
+      elements.routeList.append(createElement("h3", "route-project-heading", currentProject));
+    }
     const card = createElement("article", "route-card");
     const header = createElement("div", "route-card-header");
     header.append(
@@ -260,10 +267,11 @@ function updateLinkedRouteNote() {
     ? requirement.route_version
     : null;
   elements.linkedRouteLabel.textContent = route && baseVersion !== null
-    ? `${route.method} ${route.path} · 当前 v${route.version} / 需求基线 v${baseVersion}`
+    ? `[${route.project}] ${route.method} ${route.path} · 当前 v${route.version} / 需求基线 v${baseVersion}`
     : route
-      ? `${route.method} ${route.path} · v${route.version}`
+      ? `[${route.project}] ${route.method} ${route.path} · v${route.version}`
       : "";
+  elements.routeProject.disabled = Boolean(route);
   elements.routeMethod.disabled = Boolean(route);
   elements.routePath.disabled = Boolean(route);
   elements.unlinkRoute.hidden = Boolean(requirement);
@@ -282,10 +290,12 @@ function resetEditor() {
   elements.requirementId.value = "";
   elements.linkedRouteId.value = "";
   elements.routeMethod.value = "GET";
+  elements.routeProject.value = "default";
   elements.routePath.value = "/hello";
   elements.instructionLength.textContent = "0";
   elements.editorStatus.className = "status-chip status-draft";
   elements.editorStatus.textContent = "新需求";
+  elements.routeProject.disabled = false;
   elements.routeMethod.disabled = false;
   elements.routePath.disabled = false;
   hideMessage();
@@ -305,6 +315,7 @@ async function selectRequirement(requirementId) {
   elements.requirementId.value = requirement.id;
   elements.linkedRouteId.value = requirement.route_id || "";
   elements.requirementTitle.value = requirement.title;
+  elements.routeProject.value = requirement.project;
   elements.routeMethod.value = requirement.method;
   elements.routePath.value = requirement.path;
   elements.requirementInstruction.value = requirement.instruction;
@@ -332,6 +343,7 @@ function startFromRoute(route) {
   state.linkedRouteId = route.route_id;
   elements.linkedRouteId.value = route.route_id;
   elements.requirementTitle.value = `迭代 ${route.method} ${route.path}`;
+  elements.routeProject.value = route.project;
   elements.routeMethod.value = route.method;
   elements.routePath.value = route.path;
   elements.requirementInstruction.value = "";
@@ -371,6 +383,7 @@ function draftPayload() {
   const payload = {
     title: elements.requirementTitle.value.trim(),
     instruction: elements.requirementInstruction.value.trim(),
+    project: elements.routeProject.value.trim(),
     method: elements.routeMethod.value,
     path: elements.routePath.value.trim(),
   };
@@ -424,7 +437,7 @@ async function implementRequirement() {
     await refreshData();
     await selectRequirement(implemented.id);
     showMessage(
-      `已发布 ${implemented.method} ${implemented.path} · v${implemented.route_version}`,
+      `已发布 [${implemented.project}] ${implemented.method} ${implemented.path} · v${implemented.route_version}`,
       "success",
     );
     showToast("功能已生成并热加载，可以立即调用业务 API。");

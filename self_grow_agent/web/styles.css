@@ -418,6 +418,18 @@ h3 {
   overflow-y: auto;
 }
 
+.route-project-heading {
+  margin: 16px 0 8px;
+  color: var(--mint);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.route-project-heading:first-child {
+  margin-top: 0;
+}
+
 .requirement-card,
 .route-card {
   width: 100%;

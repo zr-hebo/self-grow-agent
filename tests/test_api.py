@@ -258,6 +258,7 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
         "route_id": "get-hello",
         "path": "/hello",
         "method": "GET",
+        "project": "default",
         "version": 1,
         "description": "Say hello",
     }
@@ -268,6 +269,47 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
     }
     assert generator.calls[0]["path"] == "/hello"
     assert generator.calls[0]["method"] == "GET"
+
+
+def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(source='def handle(request):\n    return {"name": "orders"}\n'),
+        GeneratedHandler(source='def handle(request):\n    return {"name": "billing"}\n'),
+    )
+    client = TestClient(
+        create_test_app(settings=make_settings(tmp_path), generator=generator)
+    )
+
+    for path, project in (("/orders", "Store"), ("/billing", "billing")):
+        response = client.post(
+            "/api/v1/manage/routes",
+            headers=management_headers(),
+            json={
+                "path": path,
+                "method": "GET",
+                "project": project,
+                "instruction": f"Create {project}",
+            },
+        )
+        assert response.status_code == 201
+
+    routes = client.get("/api/v1/manage/routes", headers=management_headers())
+    filtered = client.get(
+        "/api/v1/manage/routes?project=STORE",
+        headers=management_headers(),
+    )
+
+    assert [route["project"] for route in routes.json()] == ["billing", "store"]
+    assert filtered.json() == [
+        {
+            "route_id": "get-orders",
+            "path": "/orders",
+            "method": "GET",
+            "project": "store",
+            "version": 1,
+            "description": "",
+        }
+    ]
 
 
 def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:

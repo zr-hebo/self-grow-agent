@@ -35,6 +35,7 @@ from self_grow_agent.metadata import (
 )
 from self_grow_agent.pi_generator import PiFeatureGenerator
 from self_grow_agent.pi_rpc import PiRpcClient
+from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 from self_grow_agent.runtime import (
     ReservedPathError,
     RouteAlreadyExistsError,
@@ -176,9 +177,11 @@ class CreateRouteRequest(BaseModel):
 
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
+    project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
     instruction: str = Field(min_length=1, max_length=8_000)
 
     _normalize_instruction = field_validator("instruction")(_required_text)
+    _normalize_project = field_validator("project")(normalize_project)
 
 
 class UpdateRouteRequest(BaseModel):
@@ -197,9 +200,11 @@ class CreateRequirementRequest(BaseModel):
     instruction: str = Field(min_length=1, max_length=8_000)
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
+    project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
     route_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     _normalize_required_text = field_validator("title", "instruction")(_required_text)
+    _normalize_project = field_validator("project")(normalize_project)
 
 
 class UpdateRequirementRequest(BaseModel):
@@ -215,6 +220,7 @@ class RouteResponse(BaseModel):
     route_id: str
     path: str
     method: str
+    project: str
     version: int
     description: str
 
@@ -224,6 +230,7 @@ class RouteResponse(BaseModel):
             route_id=record.route_id,
             path=record.path,
             method=record.method,
+            project=record.project,
             version=record.version,
             description=record.description,
         )
@@ -235,6 +242,7 @@ class RequirementResponse(BaseModel):
     instruction: str
     path: str
     method: str
+    project: str
     route_id: str | None
     route_version: int | None
     status: str
@@ -250,6 +258,7 @@ class RequirementResponse(BaseModel):
             instruction=record.instruction,
             path=record.path,
             method=record.method,
+            project=record.project,
             route_id=record.route_id,
             route_version=record.route_version,
             status=record.status,
@@ -545,8 +554,16 @@ def create_app(
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def list_routes() -> list[RouteResponse]:
-        return [RouteResponse.from_record(record) for record in active_runtime.list()]
+    async def list_routes(project: str | None = None) -> list[RouteResponse]:
+        normalized_project = (
+            active_runtime.normalize_project(project) if project is not None else None
+        )
+        records = active_runtime.list()
+        if normalized_project is not None:
+            records = tuple(
+                record for record in records if record.project == normalized_project
+            )
+        return [RouteResponse.from_record(record) for record in records]
 
     @app.post(
         "/api/v1/manage/routes",
@@ -559,6 +576,7 @@ def create_app(
         record = await service.create_route(
             path=payload.path,
             method=payload.method,
+            project=payload.project,
             instruction=payload.instruction,
         )
         return RouteResponse.from_record(record)
@@ -583,8 +601,11 @@ def create_app(
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def list_requirements() -> list[RequirementResponse]:
-        records = await asyncio.to_thread(active_requirement_store.list)
+    async def list_requirements(project: str | None = None) -> list[RequirementResponse]:
+        normalized_project = (
+            active_runtime.normalize_project(project) if project is not None else None
+        )
+        records = await asyncio.to_thread(active_requirement_store.list, normalized_project)
         return [RequirementResponse.from_record(record) for record in records]
 
     @app.post(
@@ -617,9 +638,10 @@ def create_app(
             if (
                 linked_route.path != normalized_path
                 or linked_route.method != normalized_method
+                or linked_route.project != payload.project
             ):
                 raise RouteValidationError(
-                    "linked route does not match the requirement method and path"
+                    "linked route does not match the requirement project, method, and path"
                 )
             route_version = linked_route.version
 
@@ -629,6 +651,7 @@ def create_app(
             payload.instruction,
             normalized_path,
             normalized_method,
+            project=payload.project,
             route_id=route_id,
             route_version=route_version,
         )
@@ -688,9 +711,10 @@ def create_app(
         if (
             active_route.path != requirement.path
             or active_route.method != requirement.method
+            or active_route.project != requirement.project
         ):
             raise RouteValidationError(
-                "linked route does not match the requirement method and path"
+                "linked route does not match the requirement project, method, and path"
             )
         rebased = await asyncio.to_thread(
             active_requirement_store.rebase_route,
@@ -758,6 +782,7 @@ def create_app(
                 route = await service.create_route(
                     path=requirement.path,
                     method=requirement.method,
+                    project=requirement.project,
                     instruction=requirement.instruction,
                     before_publish=prepare_publication,
                 )

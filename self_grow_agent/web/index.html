@@ -108,6 +108,19 @@
             </label>
 
             <div class="field-row">
+              <label class="field project-field" for="route-project">
+                <span>项目分组</span>
+                <input
+                  id="route-project"
+                  type="text"
+                  maxlength="63"
+                  value="default"
+                  pattern="[a-z][a-z0-9-]{0,62}"
+                  placeholder="例如：customer-portal"
+                  required
+                >
+              </label>
+
               <label class="field method-field" for="route-method">
                 <span>方法</span>
                 <select id="route-method">

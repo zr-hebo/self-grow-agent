@@ -80,6 +80,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   -d '{
     "path": "/hello",
     "method": "GET",
+    "project": "quickstart",
     "instruction": "创建一个同步处理器：始终返回 JSON 对象 {\"message\": \"hello\"}，不读取请求参数，并将 description 设置为 Say hello。"
   }'
 ```
@@ -220,7 +221,7 @@ curl -sS 'http://127.0.0.1:8000/healthz'
 SQLite、浏览器存储或日志；刷新页面后需要重新输入。所有需求和实现接口仍由
 `X-Management-Key` 保护，因此 `/console` 本身可打开并不代表管理数据可匿名读取。
 
-典型流程是：输入需求名称、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。状态会依次变为 `draft`、`implementing`、`active`；失败时记录安全的错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本的需求，成功后版本自动递增。
+典型流程是：输入需求名称、项目分组、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。状态会依次变为 `draft`、`implementing`、`active`；失败时记录安全的错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本和项目的需求，成功后版本自动递增。
 
 如果同一路由后来通过其他需求或管理 API 升级，控制台会同时显示“当前版本”和“需求基线”，并出现“同步最新版本”按钮。这个 rebase 必须由用户显式确认，避免静默覆盖其他更新；同步后再生成会基于最新源码继续开发。
 
@@ -230,10 +231,10 @@ Agent 把 API 分为两个平面：
 
 | 平面 | 路径 | 作用 | 鉴权 |
 |---|---|---|---|
-| 管理面 | `GET /api/v1/manage/routes` | 查看动态路由 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET /api/v1/manage/routes?project={project}` | 查看动态路由，可按项目筛选 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/routes` | 让 LLM 创建动态路由 | 必须提供 `X-Management-Key` |
 | 管理面 | `PUT /api/v1/manage/routes/{route_id}` | 让 LLM 替换现有路由逻辑 | 必须提供 `X-Management-Key` |
-| 管理面 | `GET/POST /api/v1/manage/requirements` | 列出或保存开发需求 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET/POST /api/v1/manage/requirements?project={project}` | 列出或保存开发需求，可按项目筛选 | 必须提供 `X-Management-Key` |
 | 管理面 | `PATCH /api/v1/manage/requirements/{id}` | 编辑需求内容 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/implement` | 实现需求并关联路由版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 | 必须提供 `X-Management-Key` |
@@ -241,6 +242,12 @@ Agent 把 API 分为两个平面：
 | 业务面 | 例如 `GET /hello` | 执行已经发布的动态处理器 | 当前实现不要求管理密钥 |
 
 管理面接收自然语言指令并发布代码；业务面只运行已经通过校验并激活的处理器。动态业务路由支持 `GET`、`POST`、`PUT`、`PATCH` 和 `DELETE`，并按 HTTP 方法和标准化后的完整路径精确匹配。
+
+## 项目分组
+
+创建动态 API 或控制台需求时应填写 `project`，例如 `customer-portal` 或 `billing`。项目名会标准化为小写，必须以字母开头，只能包含小写字母、数字和连字符，最长 63 个字符。运行时、SQLite 需求记录和控制台会按该字段归类；`GET /api/v1/manage/routes?project=billing` 可只查询一个项目的路由。
+
+项目是逻辑分组，不是 URL 命名空间：不同项目仍不能发布相同的 HTTP 方法和路径。升级前已存在的路由和需求会自动归入 `default` 项目，保持可恢复性。
 
 所有业务 API 的成功响应由 Agent 统一封装；生成的 `handle(request)` 返回值始终放在 `data` 中：
 
@@ -277,17 +284,19 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   -d '{
     "path": "/hello",
     "method": "GET",
+    "project": "demo",
     "instruction": "创建一个同步处理器：始终返回 JSON 对象 {\"message\": \"hello\"}，不读取请求参数，并将 description 设置为 Say hello。"
   }'
 ```
 
-创建成功返回 HTTP `201`。响应只包含以下五个字段，不会返回生成的源码：
+创建成功返回 HTTP `201`。响应只包含以下六个字段，不会返回生成的源码：
 
 ```json
 {
   "route_id": "get-hello",
   "path": "/hello",
   "method": "GET",
+  "project": "demo",
   "version": 1,
   "description": "Say hello"
 }
@@ -324,6 +333,7 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
     "route_id": "get-hello",
     "path": "/hello",
     "method": "GET",
+    "project": "demo",
     "version": 1,
     "description": "Say hello"
   }
@@ -349,6 +359,7 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/get-hello" \
   "route_id": "get-hello",
   "path": "/hello",
   "method": "GET",
+  "project": "demo",
   "version": 2,
   "description": "Greet by name"
 }

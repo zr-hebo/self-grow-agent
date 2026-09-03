@@ -70,6 +70,15 @@ def test_list_orders_requirements_by_latest_update(store: RequirementStore) -> N
     assert [record.id for record in store.list()] == [first.id, second.id]
 
 
+def test_project_is_persisted_and_can_filter_requirements(store: RequirementStore) -> None:
+    orders = store.create("Orders", "Build orders", "/orders", "GET", project="Orders")
+    billing = store.create("Billing", "Build billing", "/billing", "GET", project="billing")
+
+    assert orders.project == "orders"
+    assert billing.project == "billing"
+    assert [record.id for record in store.list(project="orders")] == [orders.id]
+
+
 def test_successful_status_flow_records_append_only_events(store: RequirementStore) -> None:
     created = store.create("Greeting", "Say hello", "/hello", "GET")
 

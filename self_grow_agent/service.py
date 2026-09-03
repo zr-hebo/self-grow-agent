@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import NoReturn
 
 from self_grow_agent.llm import FeatureGenerator, GenerationCapacityError, GenerationError
+from self_grow_agent.projects import DEFAULT_PROJECT
 from self_grow_agent.runtime import RouteAlreadyExistsError, RouteRecord, RouteRuntime
 
 PublicationHook = Callable[[str, int, str], Awaitable[None]]
@@ -59,9 +60,11 @@ class AgentManagementService:
         path: str,
         method: str,
         instruction: str,
+        project: str = DEFAULT_PROJECT,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
         normalized_path, normalized_method = self.runtime.validate_route(path, method)
+        project = self.runtime.normalize_project(project)
         existing = self.runtime.resolve(normalized_method, normalized_path)
         if existing is not None:
             raise RouteAlreadyExistsError(
@@ -83,6 +86,7 @@ class AgentManagementService:
             method=normalized_method,
             source=generated.source,
             description=generated.description,
+            project=project,
         )
 
     async def update_route(

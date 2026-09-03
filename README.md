@@ -9,6 +9,8 @@
 
 动态业务 API 的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；生成处理器的返回值位于 `data`。`/healthz` 也使用该结构，且在 `data.event_time` 返回调用时的 UTC 时间。管理 API 维持原有契约。
 
+每个动态 API 还带有 `project` 逻辑分组。创建 API 或控制台需求时传入例如 `customer-portal` 的小写项目名；控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 筛选。
+
 管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。发布新版本时，运行时会先生成、校验和试加载完整处理器，再在锁内原子替换不可变路由记录。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；操作系统支持时还会限制内存与 CPU。
 
 完整的 LLM 配置、启动步骤、自动创建和热更新示例，请参阅 [使用指南](docs/USAGE.md)。
@@ -55,6 +57,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
   -d '{
     "path": "/hello",
     "method": "GET",
+    "project": "quickstart",
     "instruction": "返回 JSON {message: hello}"
   }'
 ```
@@ -66,6 +69,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
   "route_id": "get-hello",
   "path": "/hello",
   "method": "GET",
+  "project": "quickstart",
   "version": 1,
   "description": "Say hello"
 }
@@ -96,7 +100,7 @@ curl 'http://127.0.0.1:8000/hello?name=Tom'
 查看当前动态路由：
 
 ```bash
-curl 'http://127.0.0.1:8000/api/v1/manage/routes' \
+curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 

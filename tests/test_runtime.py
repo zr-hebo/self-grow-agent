@@ -49,6 +49,7 @@ def test_create_activates_and_persists_route(runtime: RouteRuntime) -> None:
     assert record.route_id == "get-hello"
     assert record.path == "/hello"
     assert record.method == "GET"
+    assert record.project == "default"
     assert record.version == 1
     assert record.description == "A greeting"
     assert record.source_file.read_text(encoding="utf-8") == "hello v1"
@@ -60,8 +61,9 @@ def test_create_activates_and_persists_route(runtime: RouteRuntime) -> None:
     assert manifest["routes"] == [
         {
             "description": "A greeting",
-            "method": "GET",
-            "path": "/hello",
+                "method": "GET",
+                "path": "/hello",
+                "project": "default",
             "route_id": "get-hello",
             "source_file": "get-hello.v1.py",
             "version": 1,
@@ -79,6 +81,38 @@ def test_long_simple_path_uses_bounded_hashed_route_id(runtime: RouteRuntime) ->
     assert record.route_id.startswith("get-")
     assert record.source_file.is_file()
     assert runtime.resolve("GET", path) is record
+
+
+def test_project_is_normalized_persisted_and_preserved_by_updates(
+    runtime: RouteRuntime,
+) -> None:
+    created = runtime.create("/orders", "GET", "orders v1", project="Store-Api")
+
+    updated = runtime.update(
+        created.route_id,
+        "orders v2",
+        expected_version=created.version,
+    )
+
+    assert created.project == "store-api"
+    assert updated.project == "store-api"
+    manifest = json.loads(runtime.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["routes"][0]["project"] == "store-api"
+
+
+def test_legacy_manifest_routes_are_restored_in_the_default_project(
+    runtime: RouteRuntime,
+) -> None:
+    created = runtime.create("/legacy", "GET", "legacy")
+    manifest = json.loads(runtime.manifest_path.read_text(encoding="utf-8"))
+    manifest["routes"][0].pop("project")
+    runtime.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    recovered = RouteRuntime(runtime.generated_dir, loader=FakeLoader())
+
+    restored = recovered.get(created.route_id)
+    assert restored is not None
+    assert restored.project == "default"
 
 
 def test_hashed_route_id_namespace_cannot_collide_with_simple_path(

@@ -13,6 +13,8 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
+from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
+
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_FILENAME = "routes.json"
 SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
@@ -88,6 +90,7 @@ class RouteRecord:
     route_id: str
     path: str
     method: str
+    project: str
     version: int
     description: str
     source_file: Path
@@ -196,18 +199,29 @@ class RouteRuntime:
         normalized_path, normalized_method = cls.validate_route(path, method)
         return _route_id(normalized_method, normalized_path)
 
+    @staticmethod
+    def normalize_project(project: str) -> str:
+        """Validate and canonicalize a logical project identifier."""
+
+        try:
+            return normalize_project(project)
+        except ValueError as exc:
+            raise RouteValidationError(str(exc)) from None
+
     def create(
         self,
         path: str,
         method: str,
         source: str,
         description: str = "",
+        project: str = DEFAULT_PROJECT,
     ) -> RouteRecord:
         """Validate, persist, and activate a new route at version one."""
 
         normalized_path, normalized_method = self.validate_route(path, method)
         source = self._validate_source(source)
         description = self._validate_description(description)
+        project = self.normalize_project(project)
         key = (normalized_method, normalized_path)
         route_id = _route_id(normalized_method, normalized_path)
 
@@ -220,6 +234,7 @@ class RouteRuntime:
             route_id=route_id,
             path=normalized_path,
             method=normalized_method,
+            project=project,
             version=1,
             source=source,
             description=description,
@@ -254,6 +269,7 @@ class RouteRuntime:
             route_id=current.route_id,
             path=current.path,
             method=current.method,
+            project=current.project,
             version=expected_version + 1,
             source=source,
             description=description,
@@ -279,7 +295,12 @@ class RouteRuntime:
         """Return a stable, deterministically ordered snapshot of active routes."""
 
         with self._lock:
-            return tuple(sorted(self._records_by_id.values(), key=lambda item: item.route_id))
+            return tuple(
+                sorted(
+                    self._records_by_id.values(),
+                    key=lambda item: (item.project, item.route_id),
+                )
+            )
 
     def resolve(self, method: str, path: str) -> RouteRecord | None:
         """Resolve an exact method/path pair without invoking its handler."""
@@ -336,6 +357,7 @@ class RouteRuntime:
         route_id: str,
         path: str,
         method: str,
+        project: str,
         version: int,
         source: str,
         description: str,
@@ -348,6 +370,7 @@ class RouteRuntime:
             route_id=route_id,
             path=path,
             method=method,
+            project=project,
             version=version,
             description=description,
             source_file=source_file,
@@ -379,7 +402,7 @@ class RouteRuntime:
 
     def _write_manifest(self, records: Iterable[RouteRecord]) -> None:
         serialized = [self._serialize_record(record) for record in records]
-        serialized.sort(key=lambda item: item["route_id"])
+        serialized.sort(key=lambda item: (item["project"], item["route_id"]))
         payload = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "routes": serialized,
@@ -393,6 +416,7 @@ class RouteRuntime:
             "route_id": record.route_id,
             "path": record.path,
             "method": record.method,
+            "project": record.project,
             "version": record.version,
             "description": record.description,
             "source_file": record.source_file.name,
@@ -464,7 +488,7 @@ class RouteRuntime:
     def _restore_record(self, entry: object) -> RouteRecord:
         if not isinstance(entry, dict):
             raise RoutePersistenceError("manifest route entry must be an object")
-        expected_fields = {
+        legacy_fields = {
             "route_id",
             "path",
             "method",
@@ -472,11 +496,13 @@ class RouteRuntime:
             "description",
             "source_file",
         }
-        if set(entry) != expected_fields:
+        supported_fields = legacy_fields | {"project"}
+        if set(entry) != legacy_fields and set(entry) != supported_fields:
             raise RoutePersistenceError("manifest route entry has invalid fields")
 
         route_id = self._validate_route_id(entry["route_id"])
         path, method = self.validate_route(entry["path"], entry["method"])
+        project = self.normalize_project(entry.get("project", DEFAULT_PROJECT))
         version = self._validate_version(entry["version"])
         description = self._validate_description(entry["description"])
         if route_id != _route_id(method, path):
@@ -501,6 +527,7 @@ class RouteRuntime:
             route_id=route_id,
             path=path,
             method=method,
+            project=project,
             version=version,
             description=description,
             source_file=source_file,

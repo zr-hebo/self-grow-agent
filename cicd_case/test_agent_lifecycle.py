@@ -72,6 +72,7 @@ def test_dynamic_hello_create(agent_stack) -> None:
         "route_id": "get-hello",
         "path": "/hello",
         "method": "GET",
+        "project": "default",
         "version": 1,
         "description": "CICD hello handler",
     }

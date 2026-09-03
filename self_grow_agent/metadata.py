@@ -11,9 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
+
 RequirementStatus = Literal["draft", "implementing", "active", "failed"]
 INTERRUPTED_MESSAGE = "interrupted"
-_RECEIPT_COLUMNS = {
+_REQUIREMENT_COLUMNS = {
+    "project": "TEXT NOT NULL DEFAULT 'default'",
     "target_route_id": "TEXT",
     "target_route_version": "INTEGER",
     "target_source_sha256": "TEXT",
@@ -45,6 +48,7 @@ class RequirementRecord:
     instruction: str
     path: str
     method: str
+    project: str
     route_id: str | None
     route_version: int | None
     status: RequirementStatus
@@ -165,6 +169,7 @@ class RequirementStore:
                     instruction TEXT NOT NULL,
                     path TEXT NOT NULL,
                     method TEXT NOT NULL,
+                    project TEXT NOT NULL DEFAULT 'default',
                     route_id TEXT,
                     route_version INTEGER,
                     target_route_id TEXT,
@@ -217,6 +222,7 @@ class RequirementStore:
                 )
                 """
             )
+            self._ensure_requirement_columns(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS requirements_updated_at_idx
@@ -225,23 +231,28 @@ class RequirementStore:
             )
             connection.execute(
                 """
+                CREATE INDEX IF NOT EXISTS requirements_project_updated_at_idx
+                ON requirements(project, updated_at DESC, id DESC)
+                """
+            )
+            connection.execute(
+                """
                 CREATE INDEX IF NOT EXISTS events_requirement_id_idx
                 ON events(requirement_id, id)
                 """
             )
-            self._ensure_receipt_columns(connection)
             connection.commit()
             connection.execute("PRAGMA optimize")
 
     @staticmethod
-    def _ensure_receipt_columns(connection: sqlite3.Connection) -> None:
-        """Upgrade databases created before publication receipts were introduced."""
+    def _ensure_requirement_columns(connection: sqlite3.Connection) -> None:
+        """Upgrade databases created before current requirement metadata fields."""
 
         existing = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(requirements)").fetchall()
         }
-        for name, declaration in _RECEIPT_COLUMNS.items():
+        for name, declaration in _REQUIREMENT_COLUMNS.items():
             if name not in existing:
                 connection.execute(
                     f"ALTER TABLE requirements ADD COLUMN {name} {declaration}"
@@ -302,6 +313,7 @@ class RequirementStore:
         path: str,
         method: str,
         *,
+        project: str = DEFAULT_PROJECT,
         route_id: str | None = None,
         route_version: int | None = None,
     ) -> RequirementRecord:
@@ -311,6 +323,7 @@ class RequirementStore:
         instruction = _validate_text("instruction", instruction)
         path = _validate_text("path", path)
         method = _validate_text("method", method)
+        project = normalize_project(project)
         route_id, route_version = _validate_route_link(route_id, route_version)
 
         requirement_id = uuid.uuid4().hex
@@ -320,9 +333,9 @@ class RequirementStore:
             connection.execute(
                 """
                 INSERT INTO requirements (
-                    id, title, instruction, path, method, route_id, route_version,
+                    id, title, instruction, path, method, project, route_id, route_version,
                     status, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     requirement_id,
@@ -330,6 +343,7 @@ class RequirementStore:
                     instruction,
                     path,
                     method,
+                    project,
                     route_id,
                     route_version,
                     "draft",
@@ -348,14 +362,22 @@ class RequirementStore:
             )
             connection.commit()
         return self.get(requirement_id)
-
-    def list(self) -> tuple[RequirementRecord, ...]:
+    def list(self, project: str | None = None) -> tuple[RequirementRecord, ...]:
         """Return requirements with the most recently updated first."""
 
+        if project is not None:
+            project = normalize_project(project)
         with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM requirements ORDER BY updated_at DESC, id DESC"
-            ).fetchall()
+            if project is None:
+                rows = connection.execute(
+                    "SELECT * FROM requirements ORDER BY updated_at DESC, id DESC"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM requirements WHERE project = ? "
+                    "ORDER BY updated_at DESC, id DESC",
+                    (project,),
+                ).fetchall()
         return tuple(self._record_from_row(row) for row in rows)
 
     def get(self, requirement_id: str) -> RequirementRecord:
@@ -804,6 +826,7 @@ class RequirementStore:
             instruction=row["instruction"],
             path=row["path"],
             method=row["method"],
+            project=row["project"],
             route_id=row["route_id"],
             route_version=row["route_version"],
             status=row["status"],

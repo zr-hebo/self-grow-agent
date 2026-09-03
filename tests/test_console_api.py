@@ -158,6 +158,7 @@ def create_requirement(
     instruction: str = "Return a greeting",
     path: str = "/hello",
     method: str = "GET",
+    project: str = "default",
     route_id: str | None = None,
 ):
     payload = {
@@ -165,6 +166,7 @@ def create_requirement(
         "instruction": instruction,
         "path": path,
         "method": method,
+        "project": project,
     }
     if route_id is not None:
         payload["route_id"] = route_id
@@ -195,6 +197,8 @@ def test_console_and_static_assets_are_public_but_do_not_expose_keys(
     assert "text/css" in stylesheet.headers["content-type"]
     assert "/console/assets/app.js" in console.text
     assert "/console/assets/styles.css" in console.text
+    assert 'id="route-project"' in console.text
+    assert "route-project-heading" in javascript.text
 
     csp = console.headers["content-security-policy"]
     assert "default-src 'self'" in csp
@@ -202,11 +206,41 @@ def test_console_and_static_assets_are_public_but_do_not_expose_keys(
     assert "connect-src 'self'" in csp
     assert "'unsafe-inline'" not in csp
     assert "'unsafe-eval'" not in csp
-
     public_assets = "\n".join((console.text, javascript.text, stylesheet.text))
     assert MANAGEMENT_KEY not in public_assets
     assert LLM_API_KEY not in public_assets
 
+
+def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> None:
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(
+            source='def handle(request):\n    return {"message": "orders"}\n',
+            description="Orders API",
+        )
+    )
+    client, _settings = build_client(tmp_path, generator)
+
+    created = create_requirement(
+        client,
+        title="Orders API",
+        path="/orders",
+        project="Store",
+    )
+    requirement_id = created.json()["id"]
+    implemented = client.post(
+        f"/api/v1/manage/requirements/{requirement_id}/implement",
+        headers=management_headers(),
+    )
+
+    assert created.status_code == 201
+    assert created.json()["project"] == "store"
+    assert implemented.status_code == 200
+    assert implemented.json()["project"] == "store"
+    routes = client.get(
+        "/api/v1/manage/routes?project=store",
+        headers=management_headers(),
+    )
+    assert [route["path"] for route in routes.json()] == ["/orders"]
 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
