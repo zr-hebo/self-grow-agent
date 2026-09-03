@@ -264,6 +264,7 @@ def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> 
     [
         ("GET", "/api/v1/manage/operations", None),
         ("GET", "/api/v1/manage/operations/missing", None),
+        ("POST", "/api/v1/manage/operations/missing/retry", None),
         ("GET", "/api/v1/manage/requirements", None),
         (
             "POST",

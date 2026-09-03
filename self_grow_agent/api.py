@@ -1132,6 +1132,94 @@ def create_app(
         )
         return _api_success(OperationResponse.from_record(operation))
 
+    @app.post(
+        "/api/v1/manage/operations/{operation_id}/retry",
+        response_model=ApiResponse[RouteTaskResponse],
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def retry_operation(operation_id: str) -> dict[str, Any]:
+        """Create a fresh execution snapshot from one failed operation."""
+
+        previous = await asyncio.to_thread(
+            active_requirement_store.get_operation,
+            operation_id,
+        )
+        if previous.status != "failed":
+            raise RequirementBusyError(
+                f"operation {operation_id!r} cannot retry from status "
+                f"{previous.status!r}"
+            )
+
+        requirement = await asyncio.to_thread(
+            active_requirement_store.get,
+            previous.requirement_id,
+        )
+        retry_path = previous.path
+        retry_method = previous.method
+        retry_project = previous.project
+        base_route_id: str | None = None
+        base_route_version: int | None = None
+
+        if previous.kind in {"update", "move"}:
+            current_route_id = requirement.route_id or previous.base_route_id
+            current_route = (
+                active_runtime.get(current_route_id)
+                if current_route_id is not None
+                else None
+            )
+            if current_route is None:
+                raise ManagedRouteNotFoundError("managed route not found")
+            base_route_id = current_route.route_id
+            base_route_version = current_route.version
+            if previous.kind == "update":
+                retry_path = current_route.path
+                retry_method = current_route.method
+                retry_project = current_route.project
+            elif current_route.method != previous.method:
+                raise RouteValidationError(
+                    "a route move cannot change the HTTP method"
+                )
+
+        retry = await asyncio.to_thread(
+            active_requirement_store.create_operation,
+            requirement.id,
+            kind=previous.kind,
+            instruction=previous.instruction,
+            path=retry_path,
+            method=retry_method,
+            project=retry_project,
+            base_route_id=base_route_id,
+            base_route_version=base_route_version,
+        )
+        _logger.info(
+            "route_task retry_accepted operation_id=%s source_operation_id=%s "
+            "requirement_id=%s kind=%s base_route_id=%s base_route_version=%s "
+            "project=%s method=%s path=%s instruction_chars=%s",
+            retry.id,
+            previous.id,
+            requirement.id,
+            retry.kind,
+            retry.base_route_id,
+            retry.base_route_version,
+            retry.project,
+            retry.method,
+            retry.path,
+            len(retry.instruction),
+        )
+        start_requirement_implementation(requirement.id, retry.id)
+        return _api_success(
+            RouteTaskResponse(
+                requirement_id=requirement.id,
+                operation_id=retry.id,
+                project=retry.project,
+                path=retry.path,
+                method=retry.method,
+                operation_url=f"/api/v1/manage/operations/{retry.id}",
+            )
+        )
+
     @app.get(
         "/api/v1/manage/requirements",
         response_model=ApiResponse[list[RequirementResponse]],

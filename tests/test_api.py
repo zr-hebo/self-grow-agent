@@ -1017,6 +1017,130 @@ def test_async_operation_persists_adapter_authored_safe_pi_failure(
     assert "error=Pi RPC run timed out" in task_logs
 
 
+def test_retry_failed_update_creates_new_operation_with_current_route_version(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    version_one = runtime.create(
+        "/hello",
+        "GET",
+        'def handle(request):\n    return {"message": "v1"}\n',
+    )
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "Greeting",
+        "Return v1",
+        "/hello",
+        "GET",
+        route_id=version_one.route_id,
+        route_version=version_one.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=version_one.route_id,
+        route_version=version_one.version,
+    )
+    version_two_source = 'def handle(request):\n    return {"message": "v2"}\n'
+    generator = FakeFeatureGenerator(
+        GenerationError("Pi RPC run timed out"),
+        GeneratedHandler(
+            source='def handle(request):\n    return {"message": "v3"}\n',
+            description="Greeting v3",
+        ),
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    with TestClient(app) as client:
+        first = client.post(
+            f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+            headers=management_headers(),
+            json={"title": "Greeting v3", "instruction": "Return v3"},
+        )
+        first_receipt = api_data(first)
+        for _ in range(100):
+            failed = api_data(
+                client.get(
+                    first_receipt["operation_url"],
+                    headers=management_headers(),
+                )
+            )
+            if failed["status"] == "failed":
+                break
+            time.sleep(0.01)
+
+        runtime.update(version_one.route_id, version_two_source, expected_version=1)
+        retried = client.post(
+            f"/api/v1/manage/operations/{failed['id']}/retry",
+            headers=management_headers(),
+        )
+        retry_receipt = api_data(retried)
+        for _ in range(100):
+            completed = api_data(
+                client.get(
+                    retry_receipt["operation_url"],
+                    headers=management_headers(),
+                )
+            )
+            if completed["status"] == "finish":
+                break
+            time.sleep(0.01)
+
+    assert first.status_code == 202
+    assert failed["status"] == "failed"
+    assert retried.status_code == 202
+    assert retry_receipt["requirement_id"] == requirement.id
+    assert retry_receipt["operation_id"] != failed["id"]
+    assert completed["id"] == retry_receipt["operation_id"]
+    assert completed["base_route_id"] == version_one.route_id
+    assert completed["base_route_version"] == 2
+    assert completed["target_route_version"] == 3
+    assert generator.calls[1]["current_source"] == version_two_source
+
+
+def test_retry_requires_failed_operation_and_management_key(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create("Greeting", "Return hello", "/hello", "GET")
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+    )
+    app = build_app(
+        settings=settings,
+        generator=FakeFeatureGenerator(),
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    with TestClient(app) as client:
+        unauthorized = client.post(
+            f"/api/v1/manage/operations/{operation.id}/retry"
+        )
+        conflict = client.post(
+            f"/api/v1/manage/operations/{operation.id}/retry",
+            headers=management_headers(),
+        )
+
+    assert_api_error(unauthorized, "invalid management key")
+    assert conflict.status_code == 409
+    assert conflict.json()["message"] == (
+        f"operation '{operation.id}' cannot retry from status 'accepted'"
+    )
+    assert conflict.json()["data"] is None
+
+
 def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:
     path = "/" + ("a" * 255)
     generator = FakeFeatureGenerator(

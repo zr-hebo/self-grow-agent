@@ -87,6 +87,15 @@ curl "http://127.0.0.1:8000/api/v1/manage/operations/<operation-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
+如果 operation 已经是 `failed`，可以直接按原指令重试。服务会创建新的
+`operation_id`；更新或迁移任务会自动绑定重试时的当前路由版本：
+
+```bash
+curl -sS -X POST \
+  "http://127.0.0.1:8000/api/v1/manage/operations/<failed-operation-id>/retry" \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY"
+```
+
 任务激活后调用业务 API：
 
 ```bash
@@ -147,6 +156,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `POST` | `/api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移路由 |
 | `GET` | `/api/v1/manage/operations?requirement_id={id}` | 查看执行记录 |
 | `GET` | `/api/v1/manage/operations/{id}` | 查询一次异步执行的状态 |
+| `POST` | `/api/v1/manage/operations/{id}/retry` | 用失败记录创建新的异步重试任务 |
 | `GET/POST` | `/api/v1/manage/requirements?project={project}` | 列出或保存 SQLite 需求元数据，可按项目筛选 |
 | `GET` | `/api/v1/manage/requirements/{id}` | 查询稳定的需求定义及最新状态 |
 | `PATCH` | `/api/v1/manage/requirements/{id}` | 编辑需求草稿 |

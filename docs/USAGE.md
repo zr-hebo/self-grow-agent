@@ -110,6 +110,16 @@ curl -sS "$AGENT_URL/api/v1/manage/operations/<operation-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
+失败的 operation 可以直接重试，不需要重新提交整段需求内容。旧 operation 保持
+`failed`，接口返回一个新的 `operation_id` 和 `operation_url`。对于 update/move，
+服务会重新读取当前 route/version，避免继续使用失败任务中的过期版本：
+
+```bash
+curl -sS -X POST \
+  "$AGENT_URL/api/v1/manage/operations/<failed-operation-id>/retry" \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY"
+```
+
 任务激活后即可访问刚刚创建的功能：
 
 ```bash
@@ -264,6 +274,7 @@ Agent 把 API 分为两个平面：
 | 管理面 | `POST /api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移现有路由 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/operations?requirement_id={id}` | 查看需求的执行历史 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/operations/{id}` | 查询一次异步执行状态 | 必须提供 `X-Management-Key` |
+| 管理面 | `POST /api/v1/manage/operations/{id}/retry` | 用失败记录创建新的异步重试任务 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET/POST /api/v1/manage/requirements?project={project}` | 列出或保存开发需求，可按项目筛选 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/requirements/{id}` | 查询稳定的需求定义及最新状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `PATCH /api/v1/manage/requirements/{id}` | 编辑需求内容 | 必须提供 `X-Management-Key` |
