@@ -3,6 +3,7 @@ import secrets
 import threading
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -184,7 +185,15 @@ def management_headers() -> dict[str, str]:
 def test_health_and_unknown_business_route(tmp_path: Path) -> None:
     client = TestClient(create_test_app(settings=make_settings(tmp_path), generator=None))
 
-    assert client.get("/healthz").json() == {"status": "ok"}
+    health = client.get("/healthz")
+    assert health.status_code == 200
+    assert health.json()["code"] == 0
+    assert health.json()["message"] == "OK"
+    assert health.json()["data"]["status"] == "ok"
+    event_time = datetime.fromisoformat(
+        health.json()["data"]["event_time"].replace("Z", "+00:00")
+    )
+    assert event_time.tzinfo == UTC
     response = client.get("/does-not-exist")
     assert response.status_code == 404
     assert response.json() == {"detail": "dynamic route not found"}

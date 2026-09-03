@@ -348,7 +348,12 @@ class AgentStack:
                 break
             try:
                 response = self.require_client().get("/healthz", timeout=0.5)
-                if response.status_code == 200 and response.json() == {"status": "ok"}:
+                body = response.json()
+                if (
+                    response.status_code == 200
+                    and body.get("code") == 0
+                    and body.get("data", {}).get("status") == "ok"
+                ):
                     return
                 last_error = f"health returned {response.status_code}: {response.text}"
             except (httpx.HTTPError, ValueError) as exc:

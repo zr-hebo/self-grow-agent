@@ -123,7 +123,10 @@ def test_concurrent_business_requests(agent_stack) -> None:
 
     health = client.get("/healthz")
     assert health.status_code == 200
-    assert health.json() == {"status": "ok"}
+    assert health.json()["code"] == 0
+    assert health.json()["message"] == "OK"
+    assert health.json()["data"]["status"] == "ok"
+    assert health.json()["data"]["event_time"].endswith("Z")
 
 
 def test_console_requirement_metadata_survives_restart(agent_stack) -> None:

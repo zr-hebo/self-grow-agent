@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -92,6 +92,12 @@ def _business_success(data: Any) -> dict[str, Any]:
     """Wrap a generated-handler result in the public business API envelope."""
 
     return {**_BUSINESS_SUCCESS_RESPONSE, "data": data}
+
+
+def _event_time() -> str:
+    """Return the API event time in an unambiguous, machine-readable format."""
+
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class RequestBodyLimitMiddleware:
@@ -530,8 +536,8 @@ def create_app(
         )
 
     @app.get("/healthz", tags=["system"])
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> dict[str, Any]:
+        return _business_success({"status": "ok", "event_time": _event_time()})
 
     @app.get(
         "/api/v1/manage/routes",
