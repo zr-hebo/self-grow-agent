@@ -10,6 +10,13 @@ from cicd_case.conftest import LLM_API_KEY, MANAGEMENT_KEY, AgentStack
 PI_STUB = Path(__file__).with_name("pi_rpc_stub.py").resolve()
 
 
+def api_data(response):
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["message"] == "OK"
+    return payload["data"]
+
+
 def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
     workspace_root = tmp_path / "pi-workspaces"
     stack = AgentStack(tmp_path)
@@ -39,7 +46,7 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
         )
 
         assert created.status_code == 202, created.text
-        operation = created.json()
+        operation = api_data(created)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             completed = client.get(
@@ -47,13 +54,13 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
                 headers=stack.management_headers,
             )
             assert completed.status_code == 200, completed.text
-            if completed.json()["status"] in {"active", "failed"}:
+            if api_data(completed)["status"] in {"active", "failed"}:
                 break
             time.sleep(0.05)
         else:
             raise AssertionError(f"Pi route task did not finish: {operation}")
-        assert completed.json()["status"] == "active", completed.text
-        assert completed.json()["route_id"] == "get-pi-hello"
+        assert api_data(completed)["status"] == "active", completed.text
+        assert api_data(completed)["route_id"] == "get-pi-hello"
         response = client.get("/pi-hello")
         assert response.status_code == 200
         assert response.json() == {

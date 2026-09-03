@@ -128,13 +128,15 @@ async function parseResponse(response) {
   } else {
     payload = await response.text();
   }
-  if (!response.ok) {
-    const detail = payload && typeof payload === "object" ? payload.detail : payload;
+  const isEnvelope = payload && typeof payload === "object" && "code" in payload
+    && "message" in payload && "data" in payload;
+  if (!response.ok || !isEnvelope || payload.code !== 0) {
+    const detail = isEnvelope ? payload.message : payload;
     const error = new Error(detail || `请求失败 (${response.status})`);
     error.status = response.status;
     throw error;
   }
-  return payload;
+  return payload.data;
 }
 
 async function managementRequest(path, options = {}) {
@@ -154,8 +156,7 @@ async function checkHealth() {
   try {
     const response = await fetch("/healthz", {cache: "no-store"});
     const payload = await parseResponse(response);
-    const health = payload.data;
-    setHealth(health?.status === "ok", health?.status === "ok" ? "运行时在线" : "运行时异常");
+    setHealth(payload?.status === "ok", payload?.status === "ok" ? "运行时在线" : "运行时异常");
   } catch (_error) {
     setHealth(false, "运行时离线");
   }

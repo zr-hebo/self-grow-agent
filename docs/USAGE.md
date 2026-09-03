@@ -85,20 +85,24 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   }'
 ```
 
-成功时先返回 HTTP `202 Accepted`，其中 `operation_id` 是 SQLite 持久化的后台任务 ID，`operation_url` 可用于查询状态。LLM 的生成、校验和热加载在后台继续执行，因此这次管理请求不会一直等待模型完成：
+成功时先返回 HTTP `202 Accepted`，其中 `data.operation_id` 是 SQLite 持久化的后台任务 ID，`data.operation_url` 可用于查询状态。LLM 的生成、校验和热加载在后台继续执行，因此这次管理请求不会一直等待模型完成：
 
 ```json
 {
-  "operation_id":"<requirement-id>",
-  "status":"accepted",
-  "project":"quickstart",
-  "path":"/hello",
-  "method":"GET",
-  "operation_url":"/api/v1/manage/requirements/<requirement-id>"
+  "code":0,
+  "message":"OK",
+  "data":{
+    "operation_id":"<requirement-id>",
+    "status":"accepted",
+    "project":"quickstart",
+    "path":"/hello",
+    "method":"GET",
+    "operation_url":"/api/v1/manage/requirements/<requirement-id>"
+  }
 }
 ```
 
-轮询该 URL，直到 `status` 为 `active`。若状态为 `failed`，查看 `last_error` 并调整需求后重试：
+轮询 `data.operation_url`，直到 `data.status` 为 `active`。若状态为 `failed`，查看 `data.last_error` 并调整需求后重试：
 
 ```bash
 curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
@@ -272,13 +276,13 @@ Agent 把 API 分为两个平面：
 
 项目是逻辑分组，不是 URL 命名空间：不同项目仍不能发布相同的 HTTP 方法和路径。升级前已存在的路由和需求会自动归入 `default` 项目，保持可恢复性。
 
-所有业务 API 的成功响应由 Agent 统一封装；生成的 `handle(request)` 返回值始终放在 `data` 中：
+所有 JSON API 的成功响应由 Agent 统一封装；业务处理器 `handle(request)` 或管理 API 的实际返回值始终放在 `data` 中：
 
 ```json
 {"code":0,"message":"OK","data":null}
 ```
 
-其中 `code` 固定为 `0`，`message` 固定为 `OK`，`data` 可以是对象、数组、字符串、数字、布尔值或 `null`。`/healthz` 也使用该成功信封，并在 `data.event_time` 中返回每次调用时生成的 RFC 3339 北京时间（`+08:00`）时间戳。控制台默认以北京时间展示需求和事件时间。管理 API 保持既有的响应契约；业务失败仍通过对应的 HTTP 状态码和 `detail` 返回。
+成功时 `code` 固定为 `0`、`message` 固定为 `OK`，`data` 可以是对象、数组、字符串、数字、布尔值或 `null`。`/healthz` 也使用该成功信封，并在 `data.event_time` 中返回每次调用时生成的 RFC 3339 北京时间（`+08:00`）时间戳。失败时 HTTP 状态码保持语义不变，响应仍是同一结构：`code` 等于 HTTP 状态码、`message` 为安全错误摘要、`data` 为 `null`。控制台默认以北京时间展示需求和事件时间。
 
 ## 并发访问业务 API
 
@@ -289,7 +293,7 @@ Agent 把 API 分为两个平面：
 | `MAX_CONCURRENT_HANDLERS` | `4` | 同时执行或已经提交到后台的动态处理器总数上限。 |
 | `HANDLER_ADMISSION_TIMEOUT_SECONDS` | `0.1` | 没有空闲槽位时，请求等待准入的最长秒数。 |
 
-等待超时会返回 HTTP `429`、`{"detail":"dynamic handler capacity is full"}` 和响应头
+等待超时会返回 HTTP `429`、`{"code":429,"message":"dynamic handler capacity is full","data":null}` 和响应头
 `Retry-After: 1`。客户端取消请求不会提前释放仍在后台运行的处理器槽位；处理器完成、失败或超时后，槽位才会重新可用。
 
 并发请求在进入动态分发器时取得不可变路由版本快照。某个请求执行期间即使管理 API 发布了新版本，该在途请求仍安全完成旧版本；发布完成后到达的新请求使用新版本，不需要重启服务。
@@ -312,20 +316,24 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   }'
 ```
 
-创建成功立即返回 HTTP `202 Accepted`。响应只包含以下六个字段，不会返回生成的源码或等待 LLM 完成：
+创建成功立即返回 HTTP `202 Accepted`。外层保持统一响应结构，`data` 中包含任务字段；不会返回生成的源码或等待 LLM 完成：
 
 ```json
 {
-  "operation_id": "<requirement-id>",
-  "status": "accepted",
-  "project": "demo",
-  "path": "/hello",
-  "method": "GET",
-  "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+  "code": 0,
+  "message": "OK",
+  "data": {
+    "operation_id": "<requirement-id>",
+    "status": "accepted",
+    "project": "demo",
+    "path": "/hello",
+    "method": "GET",
+    "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+  }
 }
 ```
 
-`operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`status=accepted` 只表示服务已接收任务。通过 `operation_url` 轮询，直到返回中的 `status` 变为 `active`；若变为 `failed`，可读取安全的 `last_error` 摘要。
+`data.operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`data.status=accepted` 只表示服务已接收任务。通过 `data.operation_url` 轮询，直到返回中的 `data.status` 变为 `active`；若变为 `failed`，可读取安全的 `data.last_error` 摘要。
 
 例如，使用响应中的实际任务 ID 查询：
 
@@ -355,19 +363,21 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
-创建示例路由后，响应是一个数组：
+创建示例路由后，响应的 `data` 是一个数组：
 
 ```json
-[
-  {
+{
+  "code": 0,
+  "message": "OK",
+  "data": [{
     "route_id": "get-hello",
     "path": "/hello",
     "method": "GET",
     "project": "demo",
     "version": 1,
     "description": "Say hello"
-  }
-]
+  }]
+}
 ```
 
 更新时必须传入列表中看到的当前 `version` 作为 `expected_version`：
@@ -386,12 +396,16 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/get-hello" \
 
 ```json
 {
-  "route_id": "get-hello",
-  "path": "/hello",
-  "method": "GET",
-  "project": "demo",
-  "version": 2,
-  "description": "Greet by name"
+  "code": 0,
+  "message": "OK",
+  "data": {
+    "route_id": "get-hello",
+    "path": "/hello",
+    "method": "GET",
+    "project": "demo",
+    "version": 2,
+    "description": "Greet by name"
+  }
 }
 ```
 
@@ -449,7 +463,7 @@ LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和�
 
 ## 常见错误与排查
 
-| HTTP 状态 | 典型 `detail` | 原因与处理 |
+| HTTP 状态 | 典型 `message` | 原因与处理 |
 |---|---|---|
 | `401` | `invalid management key` | 缺少或错误的 `X-Management-Key`；确认客户端和服务启动环境中的值一致。 |
 | `404` | `managed route not found` | 更新使用了不存在的 `route_id`；先调用路由列表接口。 |

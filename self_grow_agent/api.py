@@ -8,12 +8,22 @@ import json
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Generic, TypeVar
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import Settings, load_settings
@@ -82,6 +92,7 @@ _CONSOLE_SECURITY_HEADERS = {
 _REQUIREMENT_FINALIZE_ATTEMPTS = 3
 _BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
 _BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+ResponseData = TypeVar("ResponseData")
 
 
 def _required_text(value: str) -> str:
@@ -91,10 +102,16 @@ def _required_text(value: str) -> str:
     return normalized
 
 
-def _business_success(data: Any) -> dict[str, Any]:
-    """Wrap a generated-handler result in the public business API envelope."""
+def _api_success(data: Any) -> dict[str, Any]:
+    """Wrap successful JSON API data in the public response envelope."""
 
     return {**_BUSINESS_SUCCESS_RESPONSE, "data": data}
+
+
+def _api_error(code: int, message: str) -> dict[str, Any]:
+    """Return a stable error response without exposing internal exception details."""
+
+    return {"code": code, "message": message, "data": None}
 
 
 def _event_time() -> str:
@@ -168,7 +185,10 @@ class RequestBodyLimitMiddleware:
     async def _reject(scope: Scope, receive: Receive, send: Send) -> None:
         response = JSONResponse(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            content={"detail": "request body is too large"},
+            content=_api_error(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                "request body is too large",
+            ),
             headers={"Connection": "close"},
         )
         await response(scope, receive, send)
@@ -236,6 +256,14 @@ class RouteResponse(BaseModel):
             version=record.version,
             description=record.description,
         )
+
+
+class ApiResponse(BaseModel, Generic[ResponseData]):
+    """The response contract shared by JSON business and management endpoints."""
+
+    code: int = 0
+    message: str = "OK"
+    data: ResponseData
 
 
 class RouteTaskResponse(BaseModel):
@@ -455,7 +483,21 @@ def create_app(
         del request
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            content={"detail": str(exc)},
+            content=_api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def request_validation_error_handler(
+        request: Request,
+        exc: RequestValidationError,
+    ) -> JSONResponse:
+        del request, exc
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_api_error(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "request validation failed",
+            ),
         )
 
     @app.exception_handler(RouteAlreadyExistsError)
@@ -465,7 +507,7 @@ def create_app(
         del request
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={"detail": str(exc)},
+            content=_api_error(status.HTTP_409_CONFLICT, str(exc)),
         )
 
     @app.exception_handler(RouteNotFoundError)
@@ -474,7 +516,7 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"detail": "managed route not found"},
+            content=_api_error(status.HTTP_404_NOT_FOUND, "managed route not found"),
         )
 
     @app.exception_handler(LLMUnavailableError)
@@ -482,7 +524,7 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "LLM is not configured"},
+            content=_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "LLM is not configured"),
         )
 
     @app.exception_handler(FeatureGenerationError)
@@ -490,7 +532,7 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            content={"detail": "LLM generation failed"},
+            content=_api_error(status.HTTP_502_BAD_GATEWAY, "LLM generation failed"),
         )
 
     @app.exception_handler(FeatureGenerationCapacityError)
@@ -501,7 +543,10 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            content={"detail": "generation capacity is full"},
+            content=_api_error(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "generation capacity is full",
+            ),
             headers={"Retry-After": "1"},
         )
 
@@ -510,7 +555,7 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "route publication failed"},
+            content=_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "route publication failed"),
         )
 
     @app.exception_handler(RequirementNotFoundError)
@@ -520,7 +565,7 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
-            content={"detail": "requirement not found"},
+            content=_api_error(status.HTTP_404_NOT_FOUND, "requirement not found"),
         )
 
     @app.exception_handler(RequirementBusyError)
@@ -528,7 +573,7 @@ def create_app(
         del request
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={"detail": str(exc)},
+            content=_api_error(status.HTTP_409_CONFLICT, str(exc)),
         )
 
     @app.exception_handler(RequirementStorageError)
@@ -538,7 +583,32 @@ def create_app(
         del request, exc
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "requirement metadata is unavailable"},
+            content=_api_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "requirement metadata is unavailable",
+            ),
+        )
+
+    @app.exception_handler(HTTPException)
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error_handler(
+        request: Request,
+        exc: StarletteHTTPException,
+    ) -> JSONResponse:
+        del request
+        message = exc.detail if isinstance(exc.detail, str) else "request failed"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_api_error(exc.status_code, message),
+            headers=exc.headers,
+        )
+
+    @app.exception_handler(Exception)
+    async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+        del request, exc
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "internal server error"),
         )
 
     @app.get("/console", include_in_schema=False)
@@ -567,15 +637,15 @@ def create_app(
 
     @app.get("/healthz", tags=["system"])
     async def health() -> dict[str, Any]:
-        return _business_success({"status": "ok", "event_time": _event_time()})
+        return _api_success({"status": "ok", "event_time": _event_time()})
 
     @app.get(
         "/api/v1/manage/routes",
-        response_model=list[RouteResponse],
+        response_model=ApiResponse[list[RouteResponse]],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def list_routes(project: str | None = None) -> list[RouteResponse]:
+    async def list_routes(project: str | None = None) -> dict[str, Any]:
         normalized_project = (
             active_runtime.normalize_project(project) if project is not None else None
         )
@@ -584,11 +654,11 @@ def create_app(
             records = tuple(
                 record for record in records if record.project == normalized_project
             )
-        return [RouteResponse.from_record(record) for record in records]
+        return _api_success([RouteResponse.from_record(record) for record in records])
 
     @app.post(
         "/api/v1/manage/routes",
-        response_model=RouteTaskResponse | RouteResponse,
+        response_model=ApiResponse[RouteTaskResponse | RouteResponse],
         status_code=status.HTTP_202_ACCEPTED,
         dependencies=[management_auth],
         tags=["management"],
@@ -596,7 +666,7 @@ def create_app(
     async def create_route(
         payload: CreateRouteRequest,
         response: Response,
-    ) -> RouteTaskResponse | RouteResponse:
+    ) -> dict[str, Any]:
         if not async_route_creation:
             record = await service.create_route(
                 path=payload.path,
@@ -605,7 +675,7 @@ def create_app(
                 instruction=payload.instruction,
             )
             response.status_code = status.HTTP_201_CREATED
-            return RouteResponse.from_record(record)
+            return _api_success(RouteResponse.from_record(record))
 
         if active_generator is None:
             raise LLMUnavailableError("LLM is not configured")
@@ -627,51 +697,55 @@ def create_app(
         )
         task = asyncio.create_task(run_requirement_implementation(requirement.id))
         task.add_done_callback(consume_implementation_result)
-        return RouteTaskResponse(
-            operation_id=requirement.id,
-            project=requirement.project,
-            path=requirement.path,
-            method=requirement.method,
-            operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+        return _api_success(
+            RouteTaskResponse(
+                operation_id=requirement.id,
+                project=requirement.project,
+                path=requirement.path,
+                method=requirement.method,
+                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+            )
         )
 
     @app.put(
         "/api/v1/manage/routes/{route_id}",
-        response_model=RouteResponse,
+        response_model=ApiResponse[RouteResponse],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def update_route(route_id: str, payload: UpdateRouteRequest) -> RouteResponse:
+    async def update_route(route_id: str, payload: UpdateRouteRequest) -> dict[str, Any]:
         record = await service.update_route(
             route_id=route_id,
             instruction=payload.instruction,
             expected_version=payload.expected_version,
         )
-        return RouteResponse.from_record(record)
+        return _api_success(RouteResponse.from_record(record))
 
     @app.get(
         "/api/v1/manage/requirements",
-        response_model=list[RequirementResponse],
+        response_model=ApiResponse[list[RequirementResponse]],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def list_requirements(project: str | None = None) -> list[RequirementResponse]:
+    async def list_requirements(project: str | None = None) -> dict[str, Any]:
         normalized_project = (
             active_runtime.normalize_project(project) if project is not None else None
         )
         records = await asyncio.to_thread(active_requirement_store.list, normalized_project)
-        return [RequirementResponse.from_record(record) for record in records]
+        return _api_success(
+            [RequirementResponse.from_record(record) for record in records]
+        )
 
     @app.post(
         "/api/v1/manage/requirements",
-        response_model=RequirementResponse,
+        response_model=ApiResponse[RequirementResponse],
         status_code=status.HTTP_201_CREATED,
         dependencies=[management_auth],
         tags=["management"],
     )
     async def create_requirement(
         payload: CreateRequirementRequest,
-    ) -> RequirementResponse:
+    ) -> dict[str, Any]:
         normalized_path, normalized_method = active_runtime.validate_route(
             payload.path,
             payload.method,
@@ -709,58 +783,60 @@ def create_app(
             route_id=route_id,
             route_version=route_version,
         )
-        return RequirementResponse.from_record(record)
+        return _api_success(RequirementResponse.from_record(record))
 
     @app.patch(
         "/api/v1/manage/requirements/{requirement_id}",
-        response_model=RequirementResponse,
+        response_model=ApiResponse[RequirementResponse],
         dependencies=[management_auth],
         tags=["management"],
     )
     async def update_requirement(
         requirement_id: str,
         payload: UpdateRequirementRequest,
-    ) -> RequirementResponse:
+    ) -> dict[str, Any]:
         record = await asyncio.to_thread(
             active_requirement_store.update_content,
             requirement_id,
             title=payload.title,
             instruction=payload.instruction,
         )
-        return RequirementResponse.from_record(record)
+        return _api_success(RequirementResponse.from_record(record))
 
     @app.get(
         "/api/v1/manage/requirements/{requirement_id}",
-        response_model=RequirementResponse,
+        response_model=ApiResponse[RequirementResponse],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def get_requirement(requirement_id: str) -> RequirementResponse:
+    async def get_requirement(requirement_id: str) -> dict[str, Any]:
         record = await asyncio.to_thread(active_requirement_store.get, requirement_id)
-        return RequirementResponse.from_record(record)
+        return _api_success(RequirementResponse.from_record(record))
 
     @app.get(
         "/api/v1/manage/requirements/{requirement_id}/events",
-        response_model=list[RequirementEventResponse],
+        response_model=ApiResponse[list[RequirementEventResponse]],
         dependencies=[management_auth],
         tags=["management"],
     )
     async def list_requirement_events(
         requirement_id: str,
-    ) -> list[RequirementEventResponse]:
+    ) -> dict[str, Any]:
         events = await asyncio.to_thread(
             active_requirement_store.list_events,
             requirement_id,
         )
-        return [RequirementEventResponse.from_event(event) for event in events]
+        return _api_success(
+            [RequirementEventResponse.from_event(event) for event in events]
+        )
 
     @app.post(
         "/api/v1/manage/requirements/{requirement_id}/rebase",
-        response_model=RequirementResponse,
+        response_model=ApiResponse[RequirementResponse],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def rebase_requirement(requirement_id: str) -> RequirementResponse:
+    async def rebase_requirement(requirement_id: str) -> dict[str, Any]:
         requirement = await asyncio.to_thread(
             active_requirement_store.get,
             requirement_id,
@@ -786,7 +862,7 @@ def create_app(
             route_id=active_route.route_id,
             route_version=active_route.version,
         )
-        return RequirementResponse.from_record(rebased)
+        return _api_success(RequirementResponse.from_record(rebased))
 
     async def finalize_requirement(
         requirement_id: str,
@@ -875,11 +951,11 @@ def create_app(
 
     @app.post(
         "/api/v1/manage/requirements/{requirement_id}/implement",
-        response_model=RequirementResponse,
+        response_model=ApiResponse[RequirementResponse],
         dependencies=[management_auth],
         tags=["management"],
     )
-    async def implement_requirement(requirement_id: str) -> RequirementResponse:
+    async def implement_requirement(requirement_id: str) -> dict[str, Any]:
         current = await asyncio.to_thread(
             active_requirement_store.get,
             requirement_id,
@@ -891,14 +967,14 @@ def create_app(
                 _active_publications(active_runtime),
             )
             if current.status == "active":
-                return RequirementResponse.from_record(current)
+                return _api_success(RequirementResponse.from_record(current))
 
         implementation_task = asyncio.create_task(
             run_requirement_implementation(requirement_id)
         )
         implementation_task.add_done_callback(consume_implementation_result)
         completed = await asyncio.shield(implementation_task)
-        return RequirementResponse.from_record(completed)
+        return _api_success(RequirementResponse.from_record(completed))
 
     @app.api_route(
         "/{dynamic_path:path}",
@@ -942,7 +1018,7 @@ def create_app(
                     context,
                 )
                 execution.add_done_callback(release_handler_slot)
-                return _business_success(await asyncio.shield(execution))
+                return _api_success(await asyncio.shield(execution))
             except HandlerTimeoutError:
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,

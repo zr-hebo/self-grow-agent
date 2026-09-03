@@ -203,6 +203,21 @@ def management_headers() -> dict[str, str]:
     return {"X-Management-Key": MANAGEMENT_KEY}
 
 
+def api_data(response: httpx.Response) -> object:
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["message"] == "OK"
+    return payload["data"]
+
+
+def assert_api_error(response: httpx.Response, message: str) -> None:
+    assert response.json() == {
+        "code": response.status_code,
+        "message": message,
+        "data": None,
+    }
+
+
 def test_health_and_unknown_business_route(tmp_path: Path) -> None:
     client = TestClient(create_test_app(settings=make_settings(tmp_path), generator=None))
 
@@ -215,7 +230,7 @@ def test_health_and_unknown_business_route(tmp_path: Path) -> None:
     assert event_time.utcoffset() == timedelta(hours=8)
     response = client.get("/does-not-exist")
     assert response.status_code == 404
-    assert response.json() == {"detail": "dynamic route not found"}
+    assert_api_error(response, "dynamic route not found")
 
 
 def test_management_endpoints_require_key(tmp_path: Path) -> None:
@@ -248,7 +263,7 @@ def test_global_body_limit_runs_before_management_authentication(
     response = client.post("/api/v1/manage/routes", content=content)
 
     assert response.status_code == 413
-    assert response.json() == {"detail": "request body is too large"}
+    assert_api_error(response, "request body is too large")
 
 
 def test_create_route_is_immediately_available(tmp_path: Path) -> None:
@@ -273,7 +288,7 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
     )
 
     assert created.status_code == 201
-    assert created.json() == {
+    assert api_data(created) == {
         "route_id": "get-hello",
         "path": "/hello",
         "method": "GET",
@@ -320,35 +335,35 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
             )
             assert accepted.status_code == 202
             assert await asyncio.wait_for(generator.started.wait(), timeout=1)
-            operation = accepted.json()
+            operation = api_data(accepted)
             in_progress = await client.get(
                 operation["operation_url"],
                 headers=management_headers(),
             )
-            assert in_progress.json()["status"] in {"draft", "implementing"}
+            assert api_data(in_progress)["status"] in {"draft", "implementing"}
             generator.release.set()
             for _ in range(10):
                 completed = await client.get(
                     operation["operation_url"],
                     headers=management_headers(),
                 )
-                if completed.json()["status"] == "active":
+                if api_data(completed)["status"] == "active":
                     return accepted, completed
                 await asyncio.sleep(0)
         raise AssertionError("background route task did not complete")
 
     accepted, completed = asyncio.run(run_scenario())
 
-    assert accepted.json() == {
-        "operation_id": completed.json()["id"],
+    assert api_data(accepted) == {
+        "operation_id": api_data(completed)["id"],
         "status": "accepted",
         "project": "demo",
         "path": "/hello",
         "method": "GET",
-        "operation_url": f"/api/v1/manage/requirements/{completed.json()['id']}",
+        "operation_url": f"/api/v1/manage/requirements/{api_data(completed)['id']}",
     }
-    assert completed.json()["status"] == "active"
-    assert completed.json()["route_id"] == "get-hello"
+    assert api_data(completed)["status"] == "active"
+    assert api_data(completed)["route_id"] == "get-hello"
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
@@ -379,8 +394,8 @@ def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
         headers=management_headers(),
     )
 
-    assert [route["project"] for route in routes.json()] == ["billing", "store"]
-    assert filtered.json() == [
+    assert [route["project"] for route in api_data(routes)] == ["billing", "store"]
+    assert api_data(filtered) == [
         {
             "route_id": "get-orders",
             "path": "/orders",
@@ -408,7 +423,7 @@ def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:
     )
 
     assert created.status_code == 201
-    assert len(created.json()["route_id"]) <= 64
+    assert len(api_data(created)["route_id"]) <= 64
     assert client.get(path).json() == {
         "code": 0,
         "message": "OK",
@@ -512,7 +527,7 @@ def test_handler_process_failures_are_mapped_to_safe_http_errors(
     response = client.get("/isolated")
 
     assert response.status_code == expected_status
-    assert response.json() == {"detail": expected_detail}
+    assert_api_error(response, expected_detail)
 
 
 def test_handler_capacity_rejects_waiters_before_reading_business_body(
@@ -554,7 +569,7 @@ def test_handler_capacity_rejects_waiters_before_reading_business_body(
 
     assert first.status_code == 200
     assert rejected.status_code == 429
-    assert rejected.json() == {"detail": "dynamic handler capacity is full"}
+    assert_api_error(rejected, "dynamic handler capacity is full")
     assert rejected.headers["Retry-After"] == "1"
 
 
@@ -655,7 +670,7 @@ def test_cancelled_request_keeps_capacity_until_background_handler_finishes(
     rejected, recovered, calls_before_release = asyncio.run(run_requests())
 
     assert rejected.status_code == 429
-    assert rejected.json() == {"detail": "dynamic handler capacity is full"}
+    assert_api_error(rejected, "dynamic handler capacity is full")
     assert rejected.headers["Retry-After"] == "1"
     assert calls_before_release == 1
     assert recovered.status_code == 200
@@ -696,7 +711,7 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     )
 
     assert updated.status_code == 200
-    assert updated.json()["version"] == 2
+    assert api_data(updated)["version"] == 2
     assert client.get("/hello?name=Tom").json() == {
         "code": 0,
         "message": "OK",
@@ -790,7 +805,7 @@ def test_dynamic_request_body_limit_is_enforced(tmp_path: Path) -> None:
     response = client.post("/upload", content=b"x" * 17)
 
     assert response.status_code == 413
-    assert response.json() == {"detail": "request body is too large"}
+    assert_api_error(response, "request body is too large")
 
 
 def test_sensitive_headers_are_not_exposed_to_generated_handler(tmp_path: Path) -> None:
@@ -902,7 +917,7 @@ def test_create_conflict_and_route_listing(tmp_path: Path) -> None:
     assert duplicate.status_code == 409
     assert len(generator.calls) == 1
     assert routes.status_code == 200
-    assert [route["route_id"] for route in routes.json()] == ["get-hello"]
+    assert [route["route_id"] for route in api_data(routes)] == ["get-hello"]
 
 
 def test_management_rejects_reserved_path_and_unsupported_method(
@@ -987,7 +1002,7 @@ def test_management_reports_generation_capacity_with_retry_hint(tmp_path: Path) 
 
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "1"
-    assert response.json() == {"detail": "generation capacity is full"}
+    assert_api_error(response, "generation capacity is full")
 
 
 def test_route_publication_failure_returns_service_unavailable(
@@ -1015,4 +1030,4 @@ def test_route_publication_failure_returns_service_unavailable(
     )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "route publication failed"}
+    assert_api_error(response, "route publication failed")

@@ -7,7 +7,7 @@
 - **管理面**：管理员用自然语言要求 LLM 新增或修改 API；生成物验证通过后，无需重启进程即可生效。
 - **开发控制台**：在 `/console` 保存需求、触发实现、查看 SQLite 时间线和调用已发布 API。
 
-动态业务 API 的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；生成处理器的返回值位于 `data`。`/healthz` 也使用该结构，且在 `data.event_time` 返回调用时的北京时间（`+08:00`）。管理 API 维持原有契约。
+所有 JSON API（业务面、管理面和健康检查）的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；实际返回值位于 `data`。失败响应也使用这三个字段，`code` 为 HTTP 状态码、`data` 为 `null`。`/healthz` 在 `data.event_time` 返回调用时的北京时间（`+08:00`）。
 
 每个动态 API 还带有 `project` 逻辑分组。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名；控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。项目是逻辑分组，不是 URL 命名空间，因此跨项目也不能重复使用相同的 HTTP 方法和路径；升级前的路由与需求会归入 `default`。
 
@@ -66,16 +66,20 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
 
 ```json
 {
-  "operation_id": "<requirement-id>",
-  "status": "accepted",
-  "project": "quickstart",
-  "path": "/hello",
-  "method": "GET",
-  "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+  "code": 0,
+  "message": "OK",
+  "data": {
+    "operation_id": "<requirement-id>",
+    "status": "accepted",
+    "project": "quickstart",
+    "path": "/hello",
+    "method": "GET",
+    "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+  }
 }
 ```
 
-轮询 `operation_url`，直到 `status` 为 `active`；若为 `failed`，请查看 `last_error` 并修改后重试：
+轮询 `data.operation_url`，直到 `data.status` 为 `active`；若为 `failed`，请查看 `data.last_error` 并修改后重试：
 
 ```bash
 curl "http://127.0.0.1:8000/api/v1/manage/requirements/<requirement-id>" \

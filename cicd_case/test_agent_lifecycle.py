@@ -23,6 +23,21 @@ def handle(request):
 """
 
 
+def api_data(response):
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["message"] == "OK"
+    return payload["data"]
+
+
+def assert_api_error(response, message: str) -> None:
+    assert response.json() == {
+        "code": response.status_code,
+        "message": message,
+        "data": None,
+    }
+
+
 def _create_hello(agent_stack, source: str = HELLO_V1):
     agent_stack.stub.enqueue_handler(source, "CICD hello handler")
     return agent_stack.require_client().post(
@@ -40,7 +55,7 @@ def _wait_for_route_task(agent_stack, accepted):
     """Poll a direct-route receipt until its background implementation finishes."""
 
     assert accepted.status_code == 202, accepted.text
-    operation = accepted.json()
+    operation = api_data(accepted)
     assert operation["status"] == "accepted"
     deadline = time.monotonic() + 10
     client = agent_stack.require_client()
@@ -50,7 +65,7 @@ def _wait_for_route_task(agent_stack, accepted):
             headers=agent_stack.management_headers,
         )
         assert requirement.status_code == 200, requirement.text
-        result = requirement.json()
+        result = api_data(requirement)
         if result["status"] in {"active", "failed"}:
             assert result["status"] == "active", result
             return result
@@ -83,7 +98,7 @@ def test_management_auth(agent_stack) -> None:
     assert missing.status_code == 401
     assert wrong.status_code == 401
     assert authorized.status_code == 200
-    assert authorized.json() == []
+    assert api_data(authorized) == []
     assert agent_stack.stub.requests == []
 
 
@@ -91,7 +106,7 @@ def test_dynamic_hello_create(agent_stack) -> None:
     accepted = _create_hello(agent_stack)
 
     assert accepted.status_code == 202, accepted.text
-    operation = accepted.json()
+    operation = api_data(accepted)
     assert operation == {
         "operation_id": operation["operation_id"],
         "status": "accepted",
@@ -174,9 +189,9 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         },
     )
     assert created.status_code == 201, created.text
-    requirement_id = created.json()["id"]
-    assert created.json()["status"] == "draft"
-    assert created.json()["route_id"] is None
+    requirement_id = api_data(created)["id"]
+    assert api_data(created)["status"] == "draft"
+    assert api_data(created)["route_id"] is None
 
     agent_stack.stub.enqueue_handler(HELLO_V1, "CICD console hello handler")
     implemented = client.post(
@@ -184,8 +199,8 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         headers=agent_stack.management_headers,
     )
     assert implemented.status_code == 200, implemented.text
-    assert implemented.json()["status"] == "active"
-    assert implemented.json()["route_version"] == 1
+    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["route_version"] == 1
     assert client.get("/console-hello").json() == {
         "code": 0,
         "message": "OK",
@@ -197,7 +212,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         headers=agent_stack.management_headers,
     )
     assert events.status_code == 200
-    assert [event["to_status"] for event in events.json()] == [
+    assert [event["to_status"] for event in api_data(events)] == [
         "draft",
         "implementing",
         "active",
@@ -213,10 +228,10 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         headers=agent_stack.management_headers,
     )
     assert restored.status_code == 200
-    assert len(restored.json()) == 1
-    assert restored.json()[0]["id"] == requirement_id
-    assert restored.json()[0]["status"] == "active"
-    assert restored.json()[0]["route_version"] == 1
+    assert len(api_data(restored)) == 1
+    assert api_data(restored)[0]["id"] == requirement_id
+    assert api_data(restored)[0]["status"] == "active"
+    assert api_data(restored)[0]["route_version"] == 1
     assert agent_stack.require_client().get("/console-hello").json() == {
         "code": 0,
         "message": "OK",
@@ -232,7 +247,7 @@ def test_hot_reload_update(agent_stack) -> None:
     updated = _update_hello(agent_stack, source=HELLO_V2, expected_version=1)
 
     assert updated.status_code == 200, updated.text
-    assert updated.json()["version"] == 2
+    assert api_data(updated)["version"] == 2
     immediate = agent_stack.require_client().get("/hello", params={"name": "Codex"})
     default = agent_stack.require_client().get("/hello")
     assert immediate.status_code == 200
@@ -287,7 +302,7 @@ def test_failed_update_rollback(agent_stack) -> None:
         "/api/v1/manage/routes", headers=agent_stack.management_headers
     )
     assert routes.status_code == 200
-    assert routes.json()[0]["version"] == 2
+    assert api_data(routes)[0]["version"] == 2
     assert not (agent_stack.generated_dir / "get-hello.v3.py").exists()
     manifest = json.loads((agent_stack.generated_dir / "routes.json").read_text(encoding="utf-8"))
     assert manifest["routes"][0]["version"] == 2
@@ -316,11 +331,11 @@ def test_restart_recovery(agent_stack) -> None:
         "/api/v1/manage/routes", headers=agent_stack.management_headers
     )
     assert routes.status_code == 200
-    assert routes.json()[0]["version"] == 2
+    assert api_data(routes)[0]["version"] == 2
     unavailable = agent_stack.require_client().post(
         "/api/v1/manage/routes",
         headers=agent_stack.management_headers,
         json={"path": "/new", "method": "GET", "instruction": "Return new"},
     )
     assert unavailable.status_code == 503
-    assert unavailable.json() == {"detail": "LLM is not configured"}
+    assert_api_error(unavailable, "LLM is not configured")

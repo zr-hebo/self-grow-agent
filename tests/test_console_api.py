@@ -151,6 +151,21 @@ def management_headers() -> dict[str, str]:
     return {"X-Management-Key": MANAGEMENT_KEY}
 
 
+def api_data(response: httpx.Response) -> Any:
+    payload = response.json()
+    assert payload["code"] == 0
+    assert payload["message"] == "OK"
+    return payload["data"]
+
+
+def assert_api_error(response: httpx.Response, message: str) -> None:
+    assert response.json() == {
+        "code": response.status_code,
+        "message": message,
+        "data": None,
+    }
+
+
 def create_requirement(
     client: TestClient,
     *,
@@ -226,21 +241,21 @@ def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> 
         path="/orders",
         project="Store",
     )
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     implemented = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/implement",
         headers=management_headers(),
     )
 
     assert created.status_code == 201
-    assert created.json()["project"] == "store"
+    assert api_data(created)["project"] == "store"
     assert implemented.status_code == 200
-    assert implemented.json()["project"] == "store"
+    assert api_data(implemented)["project"] == "store"
     routes = client.get(
         "/api/v1/manage/routes?project=store",
         headers=management_headers(),
     )
-    assert [route["path"] for route in routes.json()] == ["/orders"]
+    assert [route["path"] for route in api_data(routes)] == ["/orders"]
 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
@@ -283,9 +298,9 @@ def test_every_requirement_endpoint_requires_the_management_key(
     )
 
     assert missing_key.status_code == 401
-    assert missing_key.json() == {"detail": "invalid management key"}
+    assert_api_error(missing_key, "invalid management key")
     assert incorrect_key.status_code == 401
-    assert incorrect_key.json() == {"detail": "invalid management key"}
+    assert_api_error(incorrect_key, "invalid management key")
 
 
 @pytest.mark.parametrize("blank_field", ["title", "instruction"])
@@ -316,7 +331,7 @@ def test_update_requirement_rejects_whitespace_only_content(
     generator = FakeFeatureGenerator()
     client, settings = build_client(tmp_path, generator)
     created = create_requirement(client)
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     values = {
         "title": "Updated greeting",
         "instruction": "Return an updated greeting",
@@ -349,7 +364,7 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
     created = create_requirement(client)
 
     assert created.status_code == 201
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     persisted_draft = RequirementStore(settings.metadata_db_path).get(requirement_id)
     assert persisted_draft.status == "draft"
     assert persisted_draft.route_id is None
@@ -360,9 +375,9 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
     )
 
     assert implemented.status_code == 200
-    assert implemented.json()["status"] == "active"
-    assert implemented.json()["route_id"] == "get-hello"
-    assert implemented.json()["route_version"] == 1
+    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["route_id"] == "get-hello"
+    assert api_data(implemented)["route_version"] == 1
     assert client.get("/hello").json() == {
         "code": 0,
         "message": "OK",
@@ -392,7 +407,7 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
     )
     client, settings = build_client(tmp_path, generator)
     created = create_requirement(client)
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     first_implementation = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/implement",
         headers=management_headers(),
@@ -413,12 +428,12 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
     )
 
     assert edited.status_code == 200
-    assert edited.json()["status"] == "draft"
-    assert edited.json()["route_id"] == "get-hello"
-    assert edited.json()["route_version"] == 1
+    assert api_data(edited)["status"] == "draft"
+    assert api_data(edited)["route_id"] == "get-hello"
+    assert api_data(edited)["route_version"] == 1
     assert second_implementation.status_code == 200
-    assert second_implementation.json()["status"] == "active"
-    assert second_implementation.json()["route_version"] == 2
+    assert api_data(second_implementation)["status"] == "active"
+    assert api_data(second_implementation)["route_version"] == 2
     assert client.get("/hello").json() == {
         "code": 0,
         "message": "OK",
@@ -458,18 +473,18 @@ def test_requirement_linked_to_an_existing_route_updates_that_route(
         instruction="Improve the existing greeting",
         route_id=existing.route_id,
     )
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     implemented = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/implement",
         headers=management_headers(),
     )
 
     assert created.status_code == 201
-    assert created.json()["route_id"] == existing.route_id
-    assert created.json()["route_version"] == 1
+    assert api_data(created)["route_id"] == existing.route_id
+    assert api_data(created)["route_version"] == 1
     assert implemented.status_code == 200
-    assert implemented.json()["route_id"] == existing.route_id
-    assert implemented.json()["route_version"] == 2
+    assert api_data(implemented)["route_id"] == existing.route_id
+    assert api_data(implemented)["route_version"] == 2
     assert client.get("/hello").json() == {
         "code": 0,
         "message": "OK",
@@ -516,7 +531,7 @@ def test_requirement_can_rebase_after_route_is_updated_directly(
         instruction="Apply the requirement after synchronizing",
         route_id=existing.route_id,
     )
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
 
     direct_update = client.put(
         f"/api/v1/manage/routes/{existing.route_id}",
@@ -533,14 +548,14 @@ def test_requirement_can_rebase_after_route_is_updated_directly(
     )
 
     assert direct_update.status_code == 200
-    assert direct_update.json()["version"] == 2
+    assert api_data(direct_update)["version"] == 2
     assert rebased.status_code == 200
-    assert rebased.json()["status"] == "draft"
-    assert rebased.json()["route_id"] == existing.route_id
-    assert rebased.json()["route_version"] == 2
+    assert api_data(rebased)["status"] == "draft"
+    assert api_data(rebased)["route_id"] == existing.route_id
+    assert api_data(rebased)["route_version"] == 2
     assert implemented.status_code == 200
-    assert implemented.json()["status"] == "active"
-    assert implemented.json()["route_version"] == 3
+    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["route_version"] == 3
     assert client.get("/hello").json() == {
         "code": 0,
         "message": "OK",
@@ -580,7 +595,7 @@ def test_transient_completion_conflict_is_retried_without_regenerating(
     )
     client = TestClient(app)
     created = create_requirement(client)
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
 
     implemented = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/implement",
@@ -588,8 +603,8 @@ def test_transient_completion_conflict_is_retried_without_regenerating(
     )
 
     assert implemented.status_code == 200
-    assert implemented.json()["status"] == "active"
-    assert implemented.json()["route_version"] == 1
+    assert api_data(implemented)["status"] == "active"
+    assert api_data(implemented)["route_version"] == 1
     assert store.complete_attempts == 2
     assert len(generator.calls) == 1
     assert client.get("/hello").json() == {
@@ -618,7 +633,7 @@ def test_published_receipt_is_reconciled_without_regenerating(
     )
     client = TestClient(app)
     created = create_requirement(client)
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
     actual_complete = store.complete_implementation
 
     def reject_completion(*_args, **_kwargs):
@@ -646,8 +661,8 @@ def test_published_receipt_is_reconciled_without_regenerating(
     )
 
     assert reconciled.status_code == 200
-    assert reconciled.json()["status"] == "active"
-    assert reconciled.json()["route_version"] == 1
+    assert api_data(reconciled)["status"] == "active"
+    assert api_data(reconciled)["route_version"] == 1
     assert len(generator.calls) == 1
 
 
@@ -684,7 +699,7 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
                     "method": "GET",
                 },
             )
-            requirement_id = created.json()["id"]
+            requirement_id = api_data(created)["id"]
             implementation = asyncio.create_task(
                 client.post(
                     f"/api/v1/manage/requirements/{requirement_id}/implement",
@@ -698,12 +713,11 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
 
             generator.release.set()
             assert await asyncio.to_thread(store.completed.wait, 2)
-            requirement = (
-                await client.get(
-                    "/api/v1/manage/requirements",
-                    headers=management_headers(),
-                )
-            ).json()[0]
+            requirement_response = await client.get(
+                "/api/v1/manage/requirements",
+                headers=management_headers(),
+            )
+            requirement = api_data(requirement_response)[0]
             business = await client.get("/hello")
             return requirement, business
 
@@ -725,7 +739,7 @@ def test_llm_failure_persists_only_a_safe_requirement_error(tmp_path: Path) -> N
     generator = FakeFeatureGenerator(RuntimeError(f"provider failure: {provider_detail}"))
     client, settings = build_client(tmp_path, generator)
     created = create_requirement(client)
-    requirement_id = created.json()["id"]
+    requirement_id = api_data(created)["id"]
 
     response = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/implement",
@@ -733,7 +747,7 @@ def test_llm_failure_persists_only_a_safe_requirement_error(tmp_path: Path) -> N
     )
 
     assert response.status_code == 502
-    assert response.json() == {"detail": "LLM generation failed"}
+    assert_api_error(response, "LLM generation failed")
     assert provider_detail not in response.text
 
     store = RequirementStore(settings.metadata_db_path)
@@ -758,6 +772,6 @@ def test_console_paths_cannot_be_created_as_dynamic_routes(
     response = create_requirement(client, path=reserved_path)
 
     assert response.status_code == 422
-    assert response.json() == {"detail": f"path {reserved_path!r} is reserved"}
+    assert_api_error(response, f"path {reserved_path!r} is reserved")
     assert RequirementStore(settings.metadata_db_path).list() == ()
     assert generator.calls == []
