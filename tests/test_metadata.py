@@ -465,4 +465,32 @@ def test_recovery_marks_an_unpublished_operation_failed(
 
     recovered = store.get_operation(operation.id)
     assert recovered.status == "failed"
-    assert recovered.last_error == INTERRUPTED_MESSAGE
+    assert recovered.last_error == (
+        "service restarted before operation completed "
+        "(previous status: implementing)"
+    )
+
+
+def test_recovery_identifies_an_operation_interrupted_before_it_started(
+    database_path: Path,
+) -> None:
+    store = RequirementStore(database_path)
+    requirement = store.create("Greeting", "Say hello", "/hello", "GET")
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+    )
+
+    store.recover_interrupted({})
+
+    recovered = store.get_operation(operation.id)
+    assert recovered.status == "failed"
+    assert recovered.last_error == (
+        "service restarted before operation completed "
+        "(previous status: accepted)"
+    )
+    assert store.get(requirement.id).status == "draft"

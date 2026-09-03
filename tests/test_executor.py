@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
+import os
+import subprocess
+import sys
+import textwrap
 import time
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +32,15 @@ def _blocking_worker(
     del source, module_name, request
     time.sleep(10)
     return {"status": "too late"}
+
+
+def _abrupt_exit_worker(
+    source: str,
+    module_name: str,
+    request: dict[str, object],
+) -> None:
+    del source, module_name, request
+    os._exit(7)
 
 
 def test_executes_reloaded_handler_in_subprocess() -> None:
@@ -62,6 +78,104 @@ def test_terminates_worker_after_wall_clock_timeout() -> None:
         executor.execute(VALID_SOURCE, "slow_v1", {})
 
     assert time.monotonic() - started_at < 2
+
+
+def test_logs_process_stage_and_exit_code_when_worker_exits_before_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    executor = ProcessHandlerExecutor(
+        timeout_seconds=5,
+        worker=_abrupt_exit_worker,
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with pytest.raises(HandlerProcessError) as raised:
+        executor.execute(VALID_SOURCE, "abrupt_exit_v1", {})
+
+    assert str(raised.value) == "Generated handler process failed"
+    process_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "generated_handler_process failed stage=receive" in process_logs
+    assert "exit_code=7" in process_logs
+    assert "signal=None" in process_logs
+    assert "error_type=EOFError" in process_logs
+
+
+def test_spawned_handler_import_does_not_recover_active_operation(
+    tmp_path: Path,
+) -> None:
+    entrypoint = tmp_path / "spawn_entrypoint.py"
+    entrypoint.write_text(
+        textwrap.dedent(
+            '''\
+            import json
+
+            from config import load_settings
+            from self_grow_agent.api import create_app
+            from self_grow_agent.executor import ProcessHandlerExecutor
+            from self_grow_agent.metadata import RequirementStore
+
+            settings = load_settings()
+            app = create_app(settings=settings)
+
+
+            def run():
+                store = RequirementStore(settings.metadata_db_path)
+                requirement = store.create("Greeting", "Say hello", "/hello", "GET")
+                operation = store.create_operation(
+                    requirement.id,
+                    kind="create",
+                    instruction=requirement.instruction,
+                    path=requirement.path,
+                    method=requirement.method,
+                    project=requirement.project,
+                )
+                store.begin_operation(operation.id)
+                result = ProcessHandlerExecutor(timeout_seconds=5).execute(
+                    'def handle(request):\\n    return {"message": "hello"}\\n',
+                    "spawn_import_v1",
+                    {},
+                )
+                print(json.dumps({
+                    "operation_status": store.get_operation(operation.id).status,
+                    "result": result,
+                }))
+
+
+            if __name__ == "__main__":
+                run()
+            '''
+        ),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    repository_root = Path(__file__).resolve().parents[1]
+    python_path = [str(repository_root)]
+    if environment.get("PYTHONPATH"):
+        python_path.append(environment["PYTHONPATH"])
+    environment.update(
+        {
+            "GENERATED_DIR": str(tmp_path / "generated"),
+            "METADATA_DB_PATH": str(tmp_path / "runtime-metadata.sqlite3"),
+            "LLM_API_KEY": "",
+            "PYTHONPATH": os.pathsep.join(python_path),
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(entrypoint)],
+        cwd=repository_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == {
+        "operation_status": "implementing",
+        "result": {"message": "hello"},
+    }
 
 
 @pytest.mark.parametrize(

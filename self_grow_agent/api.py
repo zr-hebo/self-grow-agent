@@ -9,6 +9,8 @@ import logging
 import re
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Generic, TypeVar
@@ -101,6 +103,9 @@ _BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 ResponseData = TypeVar("ResponseData")
 _logger = logging.getLogger("uvicorn.error")
 _PUBLIC_FINISHED_STATUS = "finish"
+_BACKGROUND_OPERATION_CANCELLED_MESSAGE = (
+    "background operation cancelled before completion"
+)
 _LOGGED_INSTRUCTION_LIMIT = 1_024
 _SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r"(?P<name>[\"']?(?:password|passwd|token|api[_ -]?key|secret|credential|"
@@ -584,6 +589,69 @@ def _active_publications(runtime: RouteRuntime) -> dict[str, tuple[int, str]]:
     }
 
 
+def _recover_interrupted_at_startup(
+    requirement_store: RequirementStore,
+    runtime: RouteRuntime,
+) -> None:
+    """Recover unfinished work only from the real application startup owner."""
+
+    pending_requirements = tuple(
+        requirement
+        for requirement in requirement_store.list()
+        if requirement.status == "implementing"
+    )
+    pending_operations = tuple(
+        operation
+        for operation in requirement_store.list_operations()
+        if operation.status in {"accepted", "implementing"}
+    )
+    requirement_store.recover_interrupted(_active_publications(runtime))
+    operation_requirement_ids = {
+        operation.requirement_id for operation in pending_operations
+    }
+    for pending_operation in pending_operations:
+        recovered_operation = requirement_store.get_operation(pending_operation.id)
+        log_recovery = (
+            _logger.info
+            if recovered_operation.status == "finish"
+            else _logger.warning
+        )
+        log_recovery(
+            "route_task recovered operation_id=%s requirement_id=%s "
+            "project=%s method=%s path=%s cause=service_restart "
+            "previous_status=%s outcome=%s error=%r",
+            recovered_operation.id,
+            recovered_operation.requirement_id,
+            recovered_operation.project,
+            recovered_operation.method,
+            recovered_operation.path,
+            pending_operation.status,
+            recovered_operation.status,
+            recovered_operation.last_error,
+        )
+    for pending_requirement in pending_requirements:
+        if pending_requirement.id in operation_requirement_ids:
+            continue
+        recovered_requirement = requirement_store.get(pending_requirement.id)
+        log_recovery = (
+            _logger.info
+            if recovered_requirement.status == "active"
+            else _logger.warning
+        )
+        log_recovery(
+            "route_task recovered requirement_id=%s project=%s method=%s "
+            "path=%s cause=service_restart previous_status=%s outcome=%s "
+            "error=%r",
+            recovered_requirement.id,
+            recovered_requirement.project,
+            recovered_requirement.method,
+            recovered_requirement.path,
+            pending_requirement.status,
+            recovered_requirement.status,
+            recovered_requirement.last_error,
+        )
+
+
 def create_app(
     *,
     settings: Settings | None = None,
@@ -606,12 +674,6 @@ def create_app(
     active_requirement_store = requirement_store or RequirementStore(
         active_settings.metadata_db_path
     )
-    if owns_requirement_store:
-        # The documented single-worker startup owns recovery. Merely opening a
-        # second RequirementStore for inspection must never mutate active work.
-        active_requirement_store.recover_interrupted(
-            _active_publications(active_runtime)
-        )
     active_handler_executor = handler_executor or ProcessHandlerExecutor(
         timeout_seconds=active_settings.handler_timeout_seconds,
         memory_limit_bytes=active_settings.handler_memory_limit_mb * 1024 * 1024,
@@ -620,7 +682,27 @@ def create_app(
     )
     handler_slots = asyncio.Semaphore(active_settings.max_concurrent_handlers)
 
-    app = FastAPI(title="Self-Growing Agent", version="0.1.0", lifespan=lifespan)
+    @asynccontextmanager
+    async def application_lifespan(lifespan_app: FastAPI) -> AsyncIterator[Any]:
+        # A spawn worker re-imports the service entrypoint before running its
+        # target. Keeping recovery inside ASGI lifespan makes app construction
+        # safe while retaining single-worker startup reconciliation.
+        if owns_requirement_store:
+            _recover_interrupted_at_startup(
+                active_requirement_store,
+                active_runtime,
+            )
+        if lifespan is None:
+            yield None
+        else:
+            async with lifespan(lifespan_app) as lifespan_state:
+                yield lifespan_state
+
+    app = FastAPI(
+        title="Self-Growing Agent",
+        version="0.1.0",
+        lifespan=application_lifespan,
+    )
     app.add_middleware(
         RequestBodyLimitMiddleware,
         max_body_bytes=active_settings.max_request_body_bytes,
@@ -1362,6 +1444,33 @@ def create_app(
                         expected_version=base_route_version,
                         before_publish=prepare_publication,
                     )
+        except asyncio.CancelledError:
+            persistence_errors: list[str] = []
+            try:
+                active_requirement_store.fail_implementation(
+                    requirement_id,
+                    _BACKGROUND_OPERATION_CANCELLED_MESSAGE,
+                )
+            except RequirementStoreError as exc:
+                persistence_errors.append(type(exc).__name__)
+            if operation is not None:
+                try:
+                    active_requirement_store.fail_operation(
+                        operation.id,
+                        _BACKGROUND_OPERATION_CANCELLED_MESSAGE,
+                    )
+                except RequirementStoreError as exc:
+                    persistence_errors.append(type(exc).__name__)
+            _logger.warning(
+                "route_task cancelled operation_id=%s requirement_id=%s "
+                "stage=generation_or_publication cause=asyncio_cancelled "
+                "persistence_errors=%s elapsed_seconds=%.3f",
+                work_id,
+                requirement_id,
+                persistence_errors or None,
+                time.monotonic() - started_at,
+            )
+            raise
         except Exception as exc:
             safe_error = _safe_requirement_error(exc)
             await fail_requirement(requirement_id, safe_error)

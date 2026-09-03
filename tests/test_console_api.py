@@ -6,6 +6,7 @@ import asyncio
 import secrets
 import threading
 from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -743,6 +744,124 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
         "message": "OK",
         "data": {"message": "hello"},
     }
+
+
+def test_cancelled_background_operation_records_specific_failure_and_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    generated = GeneratedHandler(
+        source='def handle(request):\n    return {"message": "hello"}\n',
+        description="Greeting",
+    )
+    generator = BlockingFeatureGenerator(generated)
+    settings = make_settings(tmp_path)
+    store = RequirementStore(settings.metadata_db_path)
+    app = create_app(
+        settings=settings,
+        generator=generator,  # type: ignore[arg-type]
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    async def start_and_leave_generation_pending() -> tuple[str, str]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            created = await client.post(
+                "/api/v1/manage/requirements",
+                headers=management_headers(),
+                json={
+                    "title": "Greeting API",
+                    "instruction": "Return a greeting",
+                    "path": "/hello",
+                    "method": "GET",
+                },
+            )
+            requirement_id = api_data(created)["id"]
+            accepted = await client.post(
+                f"/api/v1/manage/requirements/{requirement_id}/revise-and-implement",
+                headers=management_headers(),
+                json={
+                    "title": "Greeting API",
+                    "instruction": "Return a revised greeting",
+                },
+            )
+            operation_id = api_data(accepted)["operation_id"]
+            await asyncio.wait_for(generator.started.wait(), timeout=2)
+            return requirement_id, operation_id
+
+    caplog.set_level("INFO", logger="uvicorn.error")
+    requirement_id, operation_id = asyncio.run(start_and_leave_generation_pending())
+
+    operation = store.get_operation(operation_id)
+    requirement = store.get(requirement_id)
+    assert operation.status == "failed"
+    assert operation.last_error == "background operation cancelled before completion"
+    assert requirement.status == "failed"
+    assert requirement.last_error == operation.last_error
+    task_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"route_task cancelled operation_id={operation_id}" in task_logs
+    assert f"requirement_id={requirement_id}" in task_logs
+
+
+def test_startup_recovery_runs_only_when_the_app_lifespan_starts(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    settings = make_settings(tmp_path)
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create("Greeting", "Say hello", "/hello", "GET")
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+    )
+    store.begin_operation(operation.id)
+    lifespan_events: list[str] = []
+
+    @asynccontextmanager
+    async def custom_lifespan(_app):
+        lifespan_events.append("startup")
+        yield
+        lifespan_events.append("shutdown")
+
+    caplog.set_level("INFO", logger="uvicorn.error")
+    app = create_app(
+        settings=settings,
+        generator=None,
+        runtime=RouteRuntime(settings.generated_dir),
+        handler_executor=InlineHandlerExecutor(),
+        lifespan=custom_lifespan,
+    )
+
+    before_startup = RequirementStore(settings.metadata_db_path).get_operation(
+        operation.id
+    )
+    assert before_startup.status == "implementing"
+
+    with TestClient(app):
+        assert lifespan_events == ["startup"]
+        recovered = RequirementStore(settings.metadata_db_path).get_operation(
+            operation.id
+        )
+
+    assert lifespan_events == ["startup", "shutdown"]
+    assert recovered.status == "failed"
+    assert recovered.last_error == (
+        "service restarted before operation completed "
+        "(previous status: implementing)"
+    )
+    task_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"route_task recovered operation_id={operation.id}" in task_logs
+    assert f"requirement_id={requirement.id}" in task_logs
+    assert "previous_status=implementing" in task_logs
+    assert "outcome=failed" in task_logs
 
 
 def test_llm_failure_persists_only_a_safe_requirement_error(tmp_path: Path) -> None:

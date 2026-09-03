@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import multiprocessing
+import signal
 import time
 from collections.abc import Callable
 from multiprocessing.connection import Connection
@@ -24,6 +26,7 @@ HandlerWorker = Callable[[str, str, dict[str, Any]], Any]
 
 _ERROR_RESPONSE = b'{"status":"error","message":"generated handler process failed"}'
 _PROCESS_ERROR_MESSAGE = "Generated handler process failed"
+_logger = logging.getLogger("uvicorn.error")
 
 
 class HandlerExecutor(Protocol):
@@ -124,17 +127,22 @@ class ProcessHandlerExecutor:
         )
         deadline = time.monotonic() + self._timeout_seconds
         started = False
+        failure_stage: str | None = None
+        failure_error_type: str | None = None
         try:
             try:
                 process.start()
                 started = True
-            except Exception:
+            except Exception as exc:
+                failure_stage = "start"
+                failure_error_type = type(exc).__name__
                 raise HandlerProcessError(_PROCESS_ERROR_MESSAGE) from None
             finally:
                 send_connection.close()
 
             remaining = max(0.0, deadline - time.monotonic())
             if not receive_connection.poll(remaining):
+                failure_stage = "timeout"
                 raise HandlerTimeoutError(
                     "Generated handler execution timed out"
                 ) from None
@@ -144,25 +152,42 @@ class ProcessHandlerExecutor:
                     maxlength=self._max_result_bytes
                 )
                 response = json.loads(encoded_response)
-            except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+            except (EOFError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                failure_stage = "receive"
+                failure_error_type = type(exc).__name__
                 raise HandlerProcessError(_PROCESS_ERROR_MESSAGE) from None
 
             if type(response) is dict and response.get("status") == "error":
                 message = response.get("message")
                 if not isinstance(message, str) or not message:
                     message = _PROCESS_ERROR_MESSAGE
+                failure_stage = "worker_response"
+                failure_error_type = "worker_reported_error"
                 raise HandlerProcessError(message) from None
             if (
                 type(response) is not dict
                 or set(response) != {"status", "result"}
                 or response["status"] != "ok"
             ):
+                failure_stage = "protocol"
                 raise HandlerProcessError(_PROCESS_ERROR_MESSAGE) from None
             return response["result"]
         finally:
             receive_connection.close()
+            process_id: int | None = process.pid if started else None
+            exit_code: int | None = None
             if started:
-                _reap_process(process)
+                process_id, exit_code = _reap_process(process)
+            if failure_stage is not None:
+                _logger.warning(
+                    "generated_handler_process failed stage=%s pid=%s "
+                    "exit_code=%s signal=%s error_type=%s",
+                    failure_stage,
+                    process_id,
+                    exit_code,
+                    _exit_signal_name(exit_code),
+                    failure_error_type,
+                )
 
 
 def _execute_generated_handler(
@@ -259,7 +284,17 @@ def _lower_resource_limit(resource_module: Any, resource_id: int, limit: int) ->
         pass
 
 
-def _reap_process(process: BaseProcess) -> None:
+def _exit_signal_name(exit_code: int | None) -> str | None:
+    if exit_code is None or exit_code >= 0:
+        return None
+    try:
+        return signal.Signals(-exit_code).name
+    except ValueError:
+        return f"SIG{-exit_code}"
+
+
+def _reap_process(process: BaseProcess) -> tuple[int | None, int | None]:
+    process_id = process.pid
     if process.is_alive():
         process.terminate()
         process.join(timeout=0.2)
@@ -269,5 +304,7 @@ def _reap_process(process: BaseProcess) -> None:
     if process.is_alive() and hasattr(process, "kill"):
         process.kill()
         process.join(timeout=0.2)
+    exit_code = process.exitcode
     if not process.is_alive():
         process.close()
+    return process_id, exit_code

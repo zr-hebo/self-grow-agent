@@ -16,7 +16,8 @@ from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 RequirementStatus = Literal["draft", "implementing", "active", "failed"]
 OperationKind = Literal["create", "update", "move"]
 OperationStatus = Literal["accepted", "implementing", "finish", "failed"]
-INTERRUPTED_MESSAGE = "interrupted"
+INTERRUPTED_MESSAGE = "service restarted before implementation completed"
+OPERATION_INTERRUPTED_MESSAGE = "service restarted before operation completed"
 _REQUIREMENT_COLUMNS = {
     "project": "TEXT NOT NULL DEFAULT 'default'",
     "target_route_id": "TEXT",
@@ -418,6 +419,10 @@ class RequirementStore:
                         ("finish", timestamp, row["id"], "implementing"),
                     )
                 else:
+                    operation_error = (
+                        f"{OPERATION_INTERRUPTED_MESSAGE} "
+                        f"(previous status: {row['status']})"
+                    )
                     connection.execute(
                         """
                         UPDATE operations
@@ -426,7 +431,7 @@ class RequirementStore:
                         """,
                         (
                             "failed",
-                            INTERRUPTED_MESSAGE,
+                            operation_error,
                             timestamp,
                             row["id"],
                             "accepted",
