@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
+from self_grow_agent.api import _instruction_for_log
 from self_grow_agent.api import create_app as build_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
 from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
@@ -373,7 +374,18 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
     assert f"route_task accepted operation_id={operation_id}" in task_logs
     assert f"route_task generation_started operation_id={operation_id}" in task_logs
     assert f"route_task generation_completed operation_id={operation_id}" in task_logs
-    assert "Return hello" not in task_logs
+    assert "instruction='Return hello'" in task_logs
+
+
+def test_instruction_log_redacts_credential_values() -> None:
+    credential = secrets.token_urlsafe(32)
+
+    instruction = _instruction_for_log(
+        f"Connect using password={credential}; then return a health response"
+    )
+
+    assert credential not in instruction
+    assert "password=<redacted>" in instruction
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:

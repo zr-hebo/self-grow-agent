@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime
@@ -96,6 +97,12 @@ _BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
 _BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 ResponseData = TypeVar("ResponseData")
 _logger = logging.getLogger("uvicorn.error")
+_LOGGED_INSTRUCTION_LIMIT = 1_024
+_SENSITIVE_LOG_VALUE_PATTERN = re.compile(
+    r"(?P<name>[\"']?(?:password|passwd|token|api[_ -]?key|secret|credential|"
+    r"密码|口令|密钥)[\"']?)\s*(?P<separator>[:=：])\s*(?P<value>[^\s,，;；]+)",
+    flags=re.IGNORECASE,
+)
 
 
 def _required_text(value: str) -> str:
@@ -115,6 +122,20 @@ def _api_error(code: int, message: str) -> dict[str, Any]:
     """Return a stable error response without exposing internal exception details."""
 
     return {"code": code, "message": message, "data": None}
+
+
+def _instruction_for_log(instruction: str) -> str:
+    """Return a bounded instruction string with common credential values redacted."""
+
+    redacted = _SENSITIVE_LOG_VALUE_PATTERN.sub(
+        lambda match: (
+            f"{match.group('name')}{match.group('separator')}<redacted>"
+        ),
+        instruction,
+    )
+    if len(redacted) <= _LOGGED_INSTRUCTION_LIMIT:
+        return redacted
+    return f"{redacted[:_LOGGED_INSTRUCTION_LIMIT]}… [truncated]"
 
 
 def _event_time() -> str:
@@ -699,11 +720,12 @@ def create_app(
             project=payload.project,
         )
         _logger.info(
-            "route_task accepted operation_id=%s project=%s method=%s path=%s",
+            "route_task accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
             requirement.id,
             requirement.project,
             requirement.method,
             requirement.path,
+            _instruction_for_log(payload.instruction),
         )
         task = asyncio.create_task(run_requirement_implementation(requirement.id))
         task.add_done_callback(consume_implementation_result)
