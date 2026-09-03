@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
-from self_grow_agent.api import _instruction_for_log
+from self_grow_agent.api import _instruction_for_log, _request_parameters_for_log
 from self_grow_agent.api import create_app as build_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
 from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
@@ -476,6 +476,55 @@ def test_instruction_log_redacts_credential_values() -> None:
 
     assert credential not in instruction
     assert "password=<redacted>" in instruction
+
+
+def test_request_parameter_logging_includes_json_and_redacts_credentials() -> None:
+    credential = _random_credential()
+
+    logged = _request_parameters_for_log(
+        {
+            "name": "Tom",
+            "password": credential,
+            "nested": {"api_key": credential},
+        }
+    )
+
+    assert logged == (
+        '{"name":"Tom","nested":{"api_key":"<redacted>"},'
+        '"password":"<redacted>"}'
+    )
+    assert credential not in logged
+
+
+def test_dynamic_route_logs_query_and_json_body(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = RouteRuntime(make_settings(tmp_path).generated_dir)
+    runtime.create(
+        "/echo",
+        "POST",
+        'def handle(request):\n    return {"ok": True}\n',
+    )
+    client = TestClient(
+        create_test_app(
+            settings=make_settings(tmp_path),
+            generator=None,
+            runtime=runtime,
+        )
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    response = client.post("/echo?request_id=req-1", json={"name": "Tom"})
+
+    assert response.status_code == 200
+    dynamic_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("dynamic_route request")
+    )
+    assert 'query={"request_id":"req-1"}' in dynamic_logs
+    assert 'body={"name":"Tom"}' in dynamic_logs
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:

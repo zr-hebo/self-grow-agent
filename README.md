@@ -199,7 +199,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 
 仓库提供 `.env.example` 作为变量清单，但应用不会自动读取 `.env`；请通过进程管理器、容器配置或 shell 导出这些变量。
 
-服务启动日志会显示管理密钥是否已配置，以及用于核对的不可逆 SHA-256 指纹和掩码尾部；完整 `MANAGEMENT_API_KEY` 与 LLM API Key 不会写入日志。
+服务启动日志会显示管理密钥是否已配置，以及用于核对的不可逆 SHA-256 指纹和掩码尾部；每次动态业务 API 调用还会记录路由、查询参数和 JSON 请求体。`password`、`token`、`api_key`、`secret` 等字段值会自动脱敏，完整 `MANAGEMENT_API_KEY` 与 LLM API Key 不会写入日志。
 
 ## 热加载与恢复
 

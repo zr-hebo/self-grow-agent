@@ -104,6 +104,19 @@ _SENSITIVE_LOG_VALUE_PATTERN = re.compile(
     r"密码|口令|密钥)[\"']?)\s*(?P<separator>[:=：])\s*(?P<value>[^\s,，;；]+)",
     flags=re.IGNORECASE,
 )
+_SENSITIVE_LOG_FIELD_PARTS = frozenset(
+    {
+        "password",
+        "passwd",
+        "token",
+        "apikey",
+        "secret",
+        "credential",
+        "密码",
+        "口令",
+        "密钥",
+    }
+)
 
 
 def _required_text(value: str) -> str:
@@ -134,9 +147,52 @@ def _instruction_for_log(instruction: str) -> str:
         ),
         instruction,
     )
-    if len(redacted) <= _LOGGED_INSTRUCTION_LIMIT:
-        return redacted
-    return f"{redacted[:_LOGGED_INSTRUCTION_LIMIT]}… [truncated]"
+    return _bounded_log_text(redacted)
+
+
+def _bounded_log_text(value: str) -> str:
+    """Keep one log field bounded after it has been safely redacted."""
+
+    if len(value) <= _LOGGED_INSTRUCTION_LIMIT:
+        return value
+    return f"{value[:_LOGGED_INSTRUCTION_LIMIT]}… [truncated]"
+
+
+def _request_parameters_for_log(value: Any) -> str:
+    """Serialize request parameters for logs while redacting credential values."""
+
+    def redact(item: Any) -> Any:
+        if isinstance(item, dict):
+            redacted: dict[str, Any] = {}
+            for key, nested_value in item.items():
+                key_text = str(key)
+                normalized_key = re.sub(r"[_ -]", "", key_text).casefold()
+                if any(part in normalized_key for part in _SENSITIVE_LOG_FIELD_PARTS):
+                    redacted[key_text] = "<redacted>"
+                else:
+                    redacted[key_text] = redact(nested_value)
+            return redacted
+        if isinstance(item, list):
+            return [redact(nested_value) for nested_value in item]
+        if isinstance(item, str):
+            return _SENSITIVE_LOG_VALUE_PATTERN.sub(
+                lambda match: (
+                    f"{match.group('name')}{match.group('separator')}<redacted>"
+                ),
+                item,
+            )
+        return item
+
+    try:
+        serialized = json.dumps(
+            redact(value),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        serialized = "<unserializable request parameters>"
+    return _bounded_log_text(serialized)
 
 
 def _public_requirement_status(status_value: str) -> str:
@@ -1147,6 +1203,14 @@ def create_app(
             context = await _build_request_context(
                 request,
                 max_body_bytes=active_settings.max_request_body_bytes,
+            )
+            _logger.info(
+                "dynamic_route request route_id=%s method=%s path=%s query=%s body=%s",
+                record.route_id,
+                request.method,
+                path,
+                _request_parameters_for_log(context["query"]),
+                _request_parameters_for_log(context["body"]),
             )
             module_name = f"dynamic_{record.route_id.replace('-', '_')}_v{record.version}"
             try:
