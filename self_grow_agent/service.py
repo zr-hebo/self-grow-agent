@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import NoReturn
 
 from self_grow_agent.llm import FeatureGenerator, GenerationCapacityError, GenerationError
+from self_grow_agent.pi_generator import SAFE_PI_GENERATION_FAILURE_MESSAGES
 from self_grow_agent.projects import DEFAULT_PROJECT
 from self_grow_agent.runtime import RouteAlreadyExistsError, RouteRecord, RouteRuntime
 
@@ -30,6 +31,7 @@ class FeatureGenerationCapacityError(AgentServiceError):
 
 _SAFE_GENERATION_FAILURE_MESSAGES = frozenset(
     {
+        *SAFE_PI_GENERATION_FAILURE_MESSAGES,
         "LLM provider request failed",
         "LLM provider request timed out",
         "LLM provider authentication failed",
@@ -39,18 +41,6 @@ _SAFE_GENERATION_FAILURE_MESSAGES = frozenset(
         "LLM returned an empty generated-handler response",
         "LLM returned an invalid generated-handler response",
         "LLM returned invalid generated-handler JSON",
-        "Pi executable was not found",
-        "Pi generation timed out",
-        "Pi RPC emitted invalid JSON",
-        "Pi RPC stream ended before agent_settled",
-        "Pi RPC stream ended with an incomplete event",
-        "Pi returned invalid generated-handler JSON",
-        "Pi returned an invalid generated-handler response",
-        "Pi RPC protocol error",
-        "Pi rejected the generation request",
-        "Pi agent did not complete generation",
-        "Pi process failed",
-        "Pi generation failed",
     }
 )
 

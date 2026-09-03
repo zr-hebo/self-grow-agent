@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import re
 import secrets
 import signal
 import stat
@@ -13,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from self_grow_agent.observability import generation_log_context, operation_log_context
 from self_grow_agent.pi_rpc import (
     PiRpcAgentError,
     PiRpcClient,
@@ -113,6 +116,104 @@ def test_waits_for_agent_settled_and_returns_last_successful_assistant_text(
     assert result.final_text == "final answer"
     assert time.monotonic() - started_at >= 0.07
     assert result.events[-1]["type"] == "agent_settled"
+
+
+def test_logs_rpc_lifecycle_metrics_without_prompt_output_stderr_or_key(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    prompt_secret = secrets.token_urlsafe(32)
+    output_secret = secrets.token_urlsafe(32)
+    stderr_secret = secrets.token_urlsafe(32)
+    script = _write_rpc_script(
+        tmp_path,
+        f"""
+        sys.stderr.write({stderr_secret!r})
+        sys.stderr.flush()
+        emit({{"type": "response", "id": prompt["id"], "command": "prompt", "success": True}})
+        emit({{
+            "type": "message_end",
+            "message": {{
+                "role": "assistant",
+                "content": [{{"type": "text", "text": {output_secret!r}}}],
+                "stopReason": "stop",
+            }},
+        }})
+        emit({{"type": "agent_settled"}})
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with operation_log_context("operation-456"):
+        with generation_log_context("generation-789"):
+            result = asyncio.run(_client(tmp_path, script).run(f"Implement {prompt_secret}"))
+
+    assert result.final_text == output_secret
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    run_ids = set(re.findall(r"run_id=([0-9a-f]{32})", logs))
+    assert len(run_ids) == 1
+    assert "pi_rpc run_queued" in logs
+    assert "operation_id=operation-456" in logs
+    assert "generation_id=generation-789" in logs
+    assert "provider='deepseek' model='deepseek-chat' timeout_seconds=2.000" in logs
+    assert "prompt_chars=" in logs
+    assert "prompt_bytes=" in logs
+    assert "pi_rpc process_started" in logs
+    assert re.search(r"process_started .* pid=\d+", logs)
+    assert "pi_rpc prompt_accepted" in logs
+    assert "stop_reason_category=stop message_category=completed assistant_messages=1" in logs
+    assert "pi_rpc agent_settled" in logs
+    assert "pi_rpc cleanup_started" in logs
+    assert "pi_rpc cleanup_completed" in logs
+    assert "action=graceful" in logs
+    assert "pi_rpc run_completed" in logs
+    assert "category=success" in logs
+    assert "event_count=3" in logs
+    assert "byte_count=" in logs
+    assert re.search(r"stderr_bytes=[1-9]\d*", logs)
+    assert "elapsed_seconds=" in logs
+    assert prompt_secret not in logs
+    assert output_secret not in logs
+    assert stderr_secret not in logs
+    assert API_KEY not in logs
+
+
+def test_logs_timeout_category_and_progress_without_payload_text(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = secrets.token_urlsafe(32)
+    script = _write_rpc_script(
+        tmp_path,
+        """
+        emit({"type": "response", "id": prompt["id"], "command": "prompt", "success": True})
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with pytest.raises(PiRpcTimeoutError):
+        asyncio.run(
+            _client(tmp_path, script, timeout_seconds=0.2).run(
+                f"Never settle; private value {secret}"
+            )
+        )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "pi_rpc prompt_accepted" in logs
+    assert "pi_rpc run_failed" in logs
+    assert "category=timeout" in logs
+    assert "prompt_accepted=True" in logs
+    assert "agent_settled=False" in logs
+    assert "event_count=1" in logs
+    assert "pi_rpc cleanup_started" in logs
+    assert "pi_rpc cleanup_completed" in logs
+    assert "cleanup_action=" in logs
+    assert secret not in logs
+    assert API_KEY not in logs
 
 
 @pytest.mark.parametrize("stop_reason", ["error", "aborted", "length"])
@@ -271,9 +372,13 @@ def _assert_process_gone(pid: int) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")
-def test_timeout_reaps_wrapper_grandchild_process_group(tmp_path: Path) -> None:
+def test_timeout_reaps_wrapper_grandchild_process_group(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     process_file = tmp_path / "timeout-process-tree.json"
     script = _write_process_tree_rpc_script(tmp_path)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     with pytest.raises(PiRpcTimeoutError):
         asyncio.run(
@@ -289,6 +394,13 @@ def test_timeout_reaps_wrapper_grandchild_process_group(tmp_path: Path) -> None:
     assert processes["wrapper_session"] == processes["wrapper_pid"]
     assert processes["grandchild_group"] == processes["wrapper_pid"]
     _assert_process_gone(processes["grandchild_pid"])
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "pi_rpc cleanup_signal" in logs
+    assert "action=terminate" in logs
+    assert "cleanup_action=terminate" in logs
+    assert "observed_exit_code=None" in logs
+    assert "final_exit_code=" in logs
+    assert "final_signal=" in logs
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group behavior")

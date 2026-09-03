@@ -51,6 +51,7 @@ from self_grow_agent.metadata import (
     RequirementStore,
     RequirementStoreError,
 )
+from self_grow_agent.observability import operation_log_context
 from self_grow_agent.pi_generator import PiFeatureGenerator
 from self_grow_agent.pi_rpc import PiRpcClient
 from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
@@ -986,17 +987,17 @@ def create_app(
             project=requirement.project,
         )
         _logger.info(
-            "route_task accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
+            "route_task state_transition operation_id=%s requirement_id=%s kind=create "
+            "from_status=none to_status=accepted project=%s method=%s path=%s "
+            "instruction_chars=%s",
             operation.id,
+            requirement.id,
             requirement.project,
             requirement.method,
             requirement.path,
-            _instruction_for_log(payload.instruction),
+            len(payload.instruction),
         )
-        task = asyncio.create_task(
-            run_requirement_implementation(requirement.id, operation.id)
-        )
-        task.add_done_callback(consume_implementation_result)
+        start_requirement_implementation(requirement.id, operation.id)
         return _api_success(
             RouteTaskResponse(
                 requirement_id=requirement.id,
@@ -1077,12 +1078,17 @@ def create_app(
             base_route_version=current.version,
         )
         _logger.info(
-            "route_move accepted operation_id=%s route_id=%s project=%s method=%s path=%s",
+            "route_task state_transition operation_id=%s requirement_id=%s kind=move "
+            "from_status=none to_status=accepted base_route_id=%s "
+            "base_route_version=%s project=%s method=%s path=%s instruction_chars=%s",
             operation.id,
+            requirement.id,
             current.route_id,
+            current.version,
             requirement.project,
             requirement.method,
             requirement.path,
+            len(requirement.instruction),
         )
         start_requirement_implementation(requirement.id, operation.id)
         return _api_success(
@@ -1318,20 +1324,31 @@ def create_app(
     ) -> RequirementRecord:
         started_at = time.monotonic()
         operation: OperationRecord | None = None
-        if operation_id is None:
-            requirement = await asyncio.to_thread(
-                active_requirement_store.begin_implementation,
+        try:
+            if operation_id is None:
+                requirement = await asyncio.to_thread(
+                    active_requirement_store.begin_implementation,
+                    requirement_id,
+                )
+            else:
+                operation = await asyncio.to_thread(
+                    active_requirement_store.begin_operation,
+                    operation_id,
+                )
+                requirement = await asyncio.to_thread(
+                    active_requirement_store.get,
+                    requirement_id,
+                )
+        except Exception as exc:
+            _logger.warning(
+                "route_task claim_failed operation_id=%s requirement_id=%s "
+                "exception_type=%s elapsed_seconds=%.3f",
+                operation_id or requirement_id,
                 requirement_id,
+                type(exc).__name__,
+                time.monotonic() - started_at,
             )
-        else:
-            operation = await asyncio.to_thread(
-                active_requirement_store.begin_operation,
-                operation_id,
-            )
-            requirement = await asyncio.to_thread(
-                active_requirement_store.get,
-                requirement_id,
-            )
+            raise
         work_id = operation.id if operation is not None else requirement.id
         work_instruction = (
             operation.instruction if operation is not None else requirement.instruction
@@ -1348,14 +1365,28 @@ def create_app(
             else requirement.route_version
         )
         _logger.info(
-            "route_task generation_started operation_id=%s project=%s method=%s path=%s mode=%s",
+            "route_task state_transition operation_id=%s requirement_id=%s kind=%s "
+            "from_status=%s to_status=implementing base_route_id=%s "
+            "base_route_version=%s",
             work_id,
+            requirement_id,
+            operation.kind if operation is not None else "requirement",
+            "accepted" if operation is not None else "draft_or_failed",
+            base_route_id,
+            base_route_version,
+        )
+        _logger.info(
+            "route_task generation_started operation_id=%s requirement_id=%s "
+            "project=%s method=%s path=%s mode=%s instruction_chars=%s",
+            work_id,
+            requirement_id,
             work_project,
             work_method,
             work_path,
             operation.kind
             if operation is not None
             else ("update" if base_route_id is not None else "create"),
+            len(work_instruction),
         )
 
         async def prepare_publication(
@@ -1379,10 +1410,13 @@ def create_app(
                     source_sha256=_source_sha256(source),
                 )
             _logger.info(
-                "route_task generation_completed operation_id=%s route_id=%s version=%s; validating and publishing",
+                "route_task publication_prepared operation_id=%s requirement_id=%s "
+                "route_id=%s version=%s source_chars=%s",
                 work_id,
+                requirement_id,
                 route_id,
                 route_version,
+                len(source),
             )
 
         try:
@@ -1481,11 +1515,24 @@ def create_app(
                     safe_error,
                 )
             _logger.warning(
-                "route_task failed operation_id=%s stage=generation_or_publication error=%s elapsed_seconds=%.3f",
+                "route_task failed operation_id=%s requirement_id=%s "
+                "stage=generation_or_publication exception_type=%s error=%s "
+                "elapsed_seconds=%.3f",
                 work_id,
+                requirement_id,
+                type(exc).__name__,
                 safe_error,
                 time.monotonic() - started_at,
             )
+            if operation is not None:
+                _logger.warning(
+                    "route_task state_transition operation_id=%s requirement_id=%s "
+                    "kind=%s from_status=implementing to_status=failed error=%s",
+                    operation.id,
+                    requirement_id,
+                    operation.kind,
+                    safe_error,
+                )
             raise
         # Once the route is published, retain its receipt if SQLite finalization
         # cannot finish. Startup or a repeated implement request can then reconcile
@@ -1499,18 +1546,33 @@ def create_app(
                     route_id=route.route_id,
                     route_version=route.version,
                 )
-        except Exception:
+        except Exception as exc:
             _logger.warning(
-                "route_task finalization_pending operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
+                "route_task finalization_pending operation_id=%s requirement_id=%s "
+                "route_id=%s version=%s exception_type=%s elapsed_seconds=%.3f",
                 work_id,
+                requirement_id,
                 route.route_id,
                 route.version,
+                type(exc).__name__,
                 time.monotonic() - started_at,
             )
             raise
+        if operation is not None:
+            _logger.info(
+                "route_task state_transition operation_id=%s requirement_id=%s kind=%s "
+                "from_status=implementing to_status=finish route_id=%s version=%s",
+                operation.id,
+                requirement_id,
+                operation.kind,
+                route.route_id,
+                route.version,
+            )
         _logger.info(
-            "route_task completed operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
+            "route_task completed operation_id=%s requirement_id=%s route_id=%s "
+            "version=%s elapsed_seconds=%.3f",
             work_id,
+            requirement_id,
             completed.route_id,
             completed.route_version,
             time.monotonic() - started_at,
@@ -1524,13 +1586,15 @@ def create_app(
     def start_requirement_implementation(
         requirement_id: str,
         operation_id: str | None = None,
-    ) -> None:
+    ) -> asyncio.Task[RequirementRecord]:
         """Schedule persisted requirement work without holding a management request."""
 
-        implementation_task = asyncio.create_task(
-            run_requirement_implementation(requirement_id, operation_id)
-        )
+        with operation_log_context(operation_id or requirement_id):
+            implementation_task = asyncio.create_task(
+                run_requirement_implementation(requirement_id, operation_id)
+            )
         implementation_task.add_done_callback(consume_implementation_result)
+        return implementation_task
 
     @app.post(
         "/api/v1/manage/requirements/{requirement_id}/revise-and-implement",
@@ -1582,12 +1646,18 @@ def create_app(
             requirement_id,
         )
         _logger.info(
-            "route_task revision_accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
+            "route_task state_transition operation_id=%s requirement_id=%s kind=%s "
+            "from_status=none to_status=accepted base_route_id=%s "
+            "base_route_version=%s project=%s method=%s path=%s instruction_chars=%s",
             operation.id,
+            requirement.id,
+            operation.kind,
+            operation.base_route_id,
+            operation.base_route_version,
             requirement.project,
             requirement.method,
             requirement.path,
-            _instruction_for_log(requirement.instruction),
+            len(requirement.instruction),
         )
         start_requirement_implementation(requirement.id, operation.id)
         return _api_success(
@@ -1621,10 +1691,7 @@ def create_app(
             if current.status == "active":
                 return _api_success(RequirementResponse.from_record(current))
 
-        implementation_task = asyncio.create_task(
-            run_requirement_implementation(requirement_id)
-        )
-        implementation_task.add_done_callback(consume_implementation_result)
+        implementation_task = start_requirement_implementation(requirement_id)
         completed = await asyncio.shield(implementation_task)
         return _api_success(RequirementResponse.from_record(completed))
 

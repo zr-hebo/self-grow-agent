@@ -20,6 +20,7 @@ from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
 from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
+from self_grow_agent.observability import current_operation_id
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
 
 
@@ -57,6 +58,7 @@ class FakeFeatureGenerator:
     def __init__(self, *results: GeneratedHandler | Exception) -> None:
         self._results: Iterator[GeneratedHandler | Exception] = iter(results)
         self.calls: list[dict[str, object]] = []
+        self.operation_ids: list[str | None] = []
 
     async def generate(
         self,
@@ -66,6 +68,7 @@ class FakeFeatureGenerator:
         method: str,
         current_source: str | None = None,
     ) -> GeneratedHandler:
+        self.operation_ids.append(current_operation_id())
         self.calls.append(
             {
                 "instruction": instruction,
@@ -387,10 +390,14 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
 
     task_logs = "\n".join(record.getMessage() for record in caplog.records)
     operation_id = api_data(completed)["id"]
-    assert f"route_task accepted operation_id={operation_id}" in task_logs
+    assert f"route_task state_transition operation_id={operation_id}" in task_logs
+    assert "from_status=none to_status=accepted" in task_logs
+    assert "from_status=accepted to_status=implementing" in task_logs
     assert f"route_task generation_started operation_id={operation_id}" in task_logs
-    assert f"route_task generation_completed operation_id={operation_id}" in task_logs
-    assert "instruction='Return hello'" in task_logs
+    assert f"route_task publication_prepared operation_id={operation_id}" in task_logs
+    assert "from_status=implementing to_status=finish" in task_logs
+    assert "instruction_chars=12" in task_logs
+    assert "instruction='Return hello'" not in task_logs
 
 
 def test_revise_and_implement_saves_the_draft_and_returns_before_generation(
@@ -967,6 +974,47 @@ def test_failed_async_route_move_keeps_the_original_route(tmp_path: Path) -> Non
         assert failed["last_error"] == "Pi generation failed"
         assert client.post("/rebuild_replication").status_code == 200
         assert client.post("/binlog-server/rebuild_replication").status_code == 404
+
+
+def test_async_operation_persists_adapter_authored_safe_pi_failure(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    generator = FakeFeatureGenerator(GenerationError("Pi RPC run timed out"))
+    app = build_app(
+        settings=make_settings(tmp_path),
+        generator=generator,
+        handler_executor=InlineHandlerExecutor(),
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/api/v1/manage/routes",
+            headers=management_headers(),
+            json={
+                "project": "binlog-server",
+                "path": "/rebuild_replication",
+                "method": "POST",
+                "instruction": "Generate the route",
+            },
+        )
+        receipt = api_data(accepted)
+        for _ in range(100):
+            failed = api_data(
+                client.get(receipt["operation_url"], headers=management_headers())
+            )
+            if failed["status"] == "failed":
+                break
+            time.sleep(0.01)
+
+    assert accepted.status_code == 202
+    assert failed["id"] == receipt["operation_id"]
+    assert failed["last_error"] == "Pi RPC run timed out"
+    assert generator.operation_ids == [receipt["operation_id"]]
+    task_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"route_task failed operation_id={receipt['operation_id']}" in task_logs
+    assert "error=Pi RPC run timed out" in task_logs
 
 
 def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:

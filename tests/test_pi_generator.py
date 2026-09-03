@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 from types import SimpleNamespace
 
@@ -9,8 +10,13 @@ import pytest
 
 from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.models import GeneratedHandler
-from self_grow_agent.pi_generator import PiFeatureGenerator
+from self_grow_agent.observability import operation_log_context
+from self_grow_agent.pi_generator import (
+    SAFE_PI_GENERATION_FAILURE_MESSAGES,
+    PiFeatureGenerator,
+)
 from self_grow_agent.pi_rpc import PiRpcError, PiRpcProtocolError
+from self_grow_agent.service import _safe_generation_failure_message
 
 SOURCE = 'def handle(request):\n    return {"message": "hello"}\n'
 RESULT_JSON = json.dumps({"source": SOURCE, "description": "greeting"})
@@ -121,6 +127,39 @@ def test_generate_returns_parsed_handler() -> None:
     assert result == GeneratedHandler(source=SOURCE, description="greeting")
 
 
+def test_generation_logs_lifecycle_and_lengths_without_payload_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = secrets.token_urlsafe(32)
+    client = RecordingPiRpcClient()
+    generator = PiFeatureGenerator(rpc_client=client, max_concurrent_runs=1)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with operation_log_context("operation-123"):
+        asyncio.run(
+            generator.generate(
+                instruction=f"Return a value containing {secret}",
+                path="/default/hello",
+                method="POST",
+                current_source=f'def handle(request):\n    return {{"secret": "{secret}"}}\n',
+            )
+        )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "pi_generation queued operation_id=operation-123 generation_id=" in logs
+    assert "mode=update method=POST path=/default/hello" in logs
+    assert "instruction_chars=" in logs
+    assert "current_source_chars=" in logs
+    assert "prompt_chars=" in logs
+    assert "prompt_bytes=" in logs
+    assert "pi_generation admitted operation_id=operation-123 generation_id=" in logs
+    assert "wait_seconds=" in logs
+    assert "pi_generation completed operation_id=operation-123 generation_id=" in logs
+    assert "source_chars=" in logs
+    assert "description_chars=" in logs
+    assert secret not in logs
+
+
 def test_generate_accepts_fenced_json() -> None:
     client = RecordingPiRpcClient(f"```json\n{RESULT_JSON}\n```")
     generator = PiFeatureGenerator(rpc_client=client, max_concurrent_runs=1)
@@ -180,6 +219,40 @@ def test_generate_preserves_safe_protocol_diagnostic() -> None:
         asyncio.run(
             generator.generate(instruction="Say hello", path="/hello", method="GET")
         )
+
+
+PREVIOUSLY_DROPPED_SAFE_PI_MESSAGES = frozenset(
+    {
+        "Pi RPC assistant content is invalid",
+        "Pi RPC assistant response is invalid",
+        "Pi RPC assistant text is invalid",
+        "Pi RPC emitted duplicate prompt responses",
+        "Pi RPC emitted too many events",
+        "Pi RPC event has an invalid type",
+        "Pi RPC event is too large",
+        "Pi RPC event must be a JSON object",
+        "Pi RPC event stream is too large",
+        "Pi RPC message_end event is invalid",
+        "Pi RPC pipes could not be opened",
+        "Pi RPC process communication failed",
+        "Pi RPC prompt is too large",
+        "Pi RPC prompt response is invalid",
+        "Pi RPC run timed out",
+        "Pi RPC workspace could not be prepared",
+        "Pi agent did not complete successfully",
+        "Pi agent did not produce a final assistant response",
+        "Pi rejected the prompt command",
+    }
+)
+
+
+@pytest.mark.parametrize("safe_message", sorted(PREVIOUSLY_DROPPED_SAFE_PI_MESSAGES))
+def test_service_preserves_every_adapter_authored_safe_pi_message(
+    safe_message: str,
+) -> None:
+    assert len(PREVIOUSLY_DROPPED_SAFE_PI_MESSAGES) == 19
+    assert safe_message in SAFE_PI_GENERATION_FAILURE_MESSAGES
+    assert _safe_generation_failure_message(GenerationError(safe_message)) == safe_message
 
 
 def test_generate_limits_concurrent_rpc_runs() -> None:
