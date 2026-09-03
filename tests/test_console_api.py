@@ -278,6 +278,11 @@ def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> 
         ),
         ("GET", "/api/v1/manage/requirements/missing/events", None),
         ("POST", "/api/v1/manage/requirements/missing/implement", None),
+        (
+            "POST",
+            "/api/v1/manage/requirements/missing/revise-and-implement",
+            {"title": "Updated greeting", "instruction": "Return a new greeting"},
+        ),
         ("POST", "/api/v1/manage/requirements/missing/rebase", None),
     ],
 )

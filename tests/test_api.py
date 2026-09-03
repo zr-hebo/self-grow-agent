@@ -17,6 +17,7 @@ from self_grow_agent.api import create_app as build_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
 from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
 from self_grow_agent.llm import GenerationCapacityError
+from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
 
@@ -375,6 +376,95 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
     assert f"route_task generation_started operation_id={operation_id}" in task_logs
     assert f"route_task generation_completed operation_id={operation_id}" in task_logs
     assert "instruction='Return hello'" in task_logs
+
+
+def test_revise_and_implement_saves_the_draft_and_returns_before_generation(
+    tmp_path: Path,
+) -> None:
+    original_source = 'def handle(request):\n    return {"message": "hello-v1"}\n'
+    revised_source = 'def handle(request):\n    return {"message": "hello-v2"}\n'
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    existing = runtime.create("/hello", "GET", original_source, "Greeting v1")
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "Greeting API",
+        "Return hello v1",
+        "/hello",
+        "GET",
+        route_id=existing.route_id,
+        route_version=existing.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=existing.route_id,
+        route_version=existing.version,
+    )
+    generator = AsyncBlockingFeatureGenerator(
+        GeneratedHandler(source=revised_source, description="Greeting v2")
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    async def run_scenario() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            accepted = await client.post(
+                f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+                headers=management_headers(),
+                json={
+                    "title": "Greeting API v2",
+                    "instruction": "Return hello v2",
+                },
+            )
+            assert accepted.status_code == 202
+            assert await asyncio.wait_for(generator.started.wait(), timeout=1)
+            in_progress = await client.get(
+                f"/api/v1/manage/requirements/{requirement.id}",
+                headers=management_headers(),
+            )
+            assert api_data(in_progress)["status"] == "implementing"
+            generator.release.set()
+            for _ in range(100):
+                completed = await client.get(
+                    f"/api/v1/manage/requirements/{requirement.id}",
+                    headers=management_headers(),
+                )
+                if api_data(completed)["status"] == "finish":
+                    return accepted, completed
+                await asyncio.sleep(0.01)
+        raise AssertionError("revised requirement did not finish")
+
+    accepted, completed = asyncio.run(run_scenario())
+
+    assert api_data(accepted) == {
+        "operation_id": requirement.id,
+        "status": "accepted",
+        "project": "default",
+        "path": "/hello",
+        "method": "GET",
+        "operation_url": f"/api/v1/manage/requirements/{requirement.id}",
+    }
+    assert api_data(completed)["title"] == "Greeting API v2"
+    assert api_data(completed)["instruction"] == "Return hello v2"
+    assert api_data(completed)["route_version"] == 2
+    assert [event.to_status for event in store.list_events(requirement.id)] == [
+        "draft",
+        "implementing",
+        "active",
+        "draft",
+        "implementing",
+        "active",
+    ]
 
 
 def test_instruction_log_redacts_credential_values() -> None:

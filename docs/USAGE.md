@@ -263,6 +263,7 @@ Agent 把 API 分为两个平面：
 | 管理面 | `GET/POST /api/v1/manage/requirements?project={project}` | 列出或保存开发需求，可按项目筛选 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/requirements/{id}` | 查询一个后台路由任务或需求状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `PATCH /api/v1/manage/requirements/{id}` | 编辑需求内容 | 必须提供 `X-Management-Key` |
+| 管理面 | `POST /api/v1/manage/requirements/{id}/revise-and-implement` | 保存修改并异步生成，返回 `202` 回执 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/implement` | 实现需求并关联路由版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/requirements/{id}/events` | 查看追加式实现时间线 | 必须提供 `X-Management-Key` |
@@ -353,6 +354,23 @@ curl -sS "$AGENT_URL/hello"
 ```json
 {"code":0,"message":"OK","data":{"message":"hello"}}
 ```
+
+## 一次修改需求并重新生成
+
+已发布需求的修改通常需要先 `PATCH`，再调用 `/implement`。如果希望服务端一次完成这两个步骤，可以调用 `revise-and-implement`：它先保存新的标题和指令（将内部状态重置为 `draft`），再异步开始生成；不会等待 LLM 完成。
+
+```bash
+curl -sS -X POST \
+  "$AGENT_URL/api/v1/manage/requirements/1fc30b79b777468d8ec669d9282acc6b/revise-and-implement" \
+  -H 'Content-Type: application/json' \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY" \
+  -d '{
+    "title": "binlog-server: POST /rebuild_replication",
+    "instruction": "优化接口：校验请求体中的实例标识，返回清晰的执行计划和参数校验错误。不要连接数据库、不要执行 SQL；MySQL 操作必须调用已实现的受控后端能力。"
+  }'
+```
+
+响应为 HTTP `202 Accepted`，`data.operation_url` 仍是该需求的查询地址。轮询直到 `data.status` 为 `finish` 或 `failed`。任务处于 `implementing` 时再次修改会返回 `409`，避免并发请求覆盖正在生成的版本。
 
 ## 查看路由并热更新处理逻辑
 

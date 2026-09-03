@@ -102,6 +102,19 @@ curl 'http://127.0.0.1:8000/hello'
 
 更新使用 `expected_version` 做并发比较；版本已经变化时返回 `409`，避免覆盖其他管理请求的结果。
 
+如果修改的是一个已有需求，可将编辑和生成合并为一次异步请求。它返回 `202 Accepted`，随后轮询返回的 `data.operation_url`：
+
+```bash
+curl -sS -X POST \
+  "$AGENT_URL/api/v1/manage/requirements/<requirement-id>/revise-and-implement" \
+  -H 'Content-Type: application/json' \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY" \
+  -d '{
+    "title": "binlog-server: POST /rebuild_replication",
+    "instruction": "校验实例标识，返回执行计划和参数校验错误；不要直接连接数据库或执行 SQL。"
+  }'
+```
+
 ```bash
 curl -X PUT 'http://127.0.0.1:8000/api/v1/manage/routes/get-hello' \
   -H 'Content-Type: application/json' \
@@ -133,6 +146,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `GET/POST` | `/api/v1/manage/requirements?project={project}` | 列出或保存 SQLite 需求元数据，可按项目筛选 |
 | `GET` | `/api/v1/manage/requirements/{id}` | 查询后台路由任务或需求的当前状态 |
 | `PATCH` | `/api/v1/manage/requirements/{id}` | 编辑需求草稿 |
+| `POST` | `/api/v1/manage/requirements/{id}/revise-and-implement` | 保存修改并异步生成，返回 `202` 回执 |
 | `POST` | `/api/v1/manage/requirements/{id}/implement` | 生成、校验并发布需求 |
 | `POST` | `/api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 |
 | `GET` | `/api/v1/manage/requirements/{id}/events` | 查看实现状态时间线 |

@@ -195,12 +195,16 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
 
     agent_stack.stub.enqueue_handler(HELLO_V1, "CICD console hello handler")
     implemented = client.post(
-        f"/api/v1/manage/requirements/{requirement_id}/implement",
+        f"/api/v1/manage/requirements/{requirement_id}/revise-and-implement",
         headers=agent_stack.management_headers,
+        json={
+            "title": "CICD console greeting (revised)",
+            "instruction": "Return the CICD hello message after revision",
+        },
     )
-    assert implemented.status_code == 200, implemented.text
-    assert api_data(implemented)["status"] == "finish"
-    assert api_data(implemented)["route_version"] == 1
+    completed = _wait_for_route_task(agent_stack, implemented)
+    assert completed["status"] == "finish"
+    assert completed["route_version"] == 1
     assert client.get("/console-hello").json() == {
         "code": 0,
         "message": "OK",

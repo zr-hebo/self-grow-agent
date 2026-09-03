@@ -1041,6 +1041,54 @@ def create_app(
         if not task.cancelled():
             task.exception()
 
+    def start_requirement_implementation(requirement_id: str) -> None:
+        """Schedule persisted requirement work without holding a management request."""
+
+        implementation_task = asyncio.create_task(
+            run_requirement_implementation(requirement_id)
+        )
+        implementation_task.add_done_callback(consume_implementation_result)
+
+    @app.post(
+        "/api/v1/manage/requirements/{requirement_id}/revise-and-implement",
+        response_model=ApiResponse[RouteTaskResponse],
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def revise_and_implement_requirement(
+        requirement_id: str,
+        payload: UpdateRequirementRequest,
+    ) -> dict[str, Any]:
+        """Persist a revision and start its implementation as one async operation."""
+
+        if active_generator is None:
+            raise LLMUnavailableError("LLM is not configured")
+        requirement = await asyncio.to_thread(
+            active_requirement_store.update_content,
+            requirement_id,
+            title=payload.title,
+            instruction=payload.instruction,
+        )
+        _logger.info(
+            "route_task revision_accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
+            requirement.id,
+            requirement.project,
+            requirement.method,
+            requirement.path,
+            _instruction_for_log(requirement.instruction),
+        )
+        start_requirement_implementation(requirement.id)
+        return _api_success(
+            RouteTaskResponse(
+                operation_id=requirement.id,
+                project=requirement.project,
+                path=requirement.path,
+                method=requirement.method,
+                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+            )
+        )
+
     @app.post(
         "/api/v1/manage/requirements/{requirement_id}/implement",
         response_model=ApiResponse[RequirementResponse],
