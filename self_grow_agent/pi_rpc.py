@@ -33,7 +33,14 @@ _SAFE_PARENT_ENV = (
 _CREDENTIAL_ENV_NAME = re.compile(r"(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|TOKEN)\Z")
 _MAX_JSONL_BYTES = 1_048_576
 _MAX_EVENT_STREAM_BYTES = 8_388_608
-_MAX_EVENTS = 10_000
+_MAX_RETAINED_EVENTS = 10_000
+_STREAMING_EVENT_TYPES = frozenset(
+    {
+        "bash_execution_update",
+        "message_update",
+        "tool_execution_update",
+    }
+)
 _GRACEFUL_EXIT_SECONDS = 0.25
 _TERMINATE_SECONDS = 0.5
 _logger = logging.getLogger("uvicorn.error")
@@ -106,6 +113,8 @@ class PiRpcResult:
 @dataclass(slots=True)
 class _PiRpcProgress:
     event_count: int = 0
+    retained_event_count: int = 0
+    streaming_event_count: int = 0
     byte_count: int = 0
     prompt_accepted: bool = False
     agent_settled: bool = False
@@ -426,7 +435,8 @@ def _log_pi_rpc_outcome(
         "pid=%s observed_exit_code=%s final_exit_code=%s final_signal=%s "
         "cleanup_action=%s "
         "prompt_accepted=%s agent_settled=%s assistant_messages=%s "
-        "last_stop_reason_category=%s event_count=%s byte_count=%s "
+        "last_stop_reason_category=%s event_count=%s retained_event_count=%s "
+        "streaming_event_count=%s byte_count=%s "
         "stderr_bytes=%s elapsed_seconds=%.3f",
         outcome,
         operation_id,
@@ -443,6 +453,8 @@ def _log_pi_rpc_outcome(
         progress.assistant_messages,
         progress.last_stop_reason_category,
         progress.event_count,
+        progress.retained_event_count,
+        progress.streaming_event_count,
         progress.byte_count,
         cleanup.stderr_bytes,
         time.monotonic() - started_at,
@@ -463,21 +475,27 @@ async def _read_result(
     settled = False
     final_assistant: dict[str, object] | None = None
     total_bytes = 0
+    observed_event_count = 0
 
     while not (acknowledged and settled):
         event, event_bytes = await _read_event(stdout)
         total_bytes += event_bytes
-        progress.event_count = len(events) + 1
+        observed_event_count += 1
+        progress.event_count = observed_event_count
         progress.byte_count = total_bytes
         if total_bytes > _MAX_EVENT_STREAM_BYTES:
             raise PiRpcProtocolError("Pi RPC event stream is too large")
-        events.append(event)
-        if len(events) > _MAX_EVENTS:
-            raise PiRpcProtocolError("Pi RPC emitted too many events")
 
         event_type = event.get("type")
         if not isinstance(event_type, str):
             raise PiRpcProtocolError("Pi RPC event has an invalid type")
+        if event_type in _STREAMING_EVENT_TYPES:
+            progress.streaming_event_count += 1
+        else:
+            events.append(event)
+            progress.retained_event_count = len(events)
+            if len(events) > _MAX_RETAINED_EVENTS:
+                raise PiRpcProtocolError("Pi RPC emitted too many events")
 
         if event_type == "response" and event.get("id") == request_id:
             if acknowledged:

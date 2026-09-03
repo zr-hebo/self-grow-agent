@@ -171,6 +171,8 @@ def test_logs_rpc_lifecycle_metrics_without_prompt_output_stderr_or_key(
     assert "pi_rpc run_completed" in logs
     assert "category=success" in logs
     assert "event_count=3" in logs
+    assert "retained_event_count=3" in logs
+    assert "streaming_event_count=0" in logs
     assert "byte_count=" in logs
     assert re.search(r"stderr_bytes=[1-9]\d*", logs)
     assert "elapsed_seconds=" in logs
@@ -178,6 +180,72 @@ def test_logs_rpc_lifecycle_metrics_without_prompt_output_stderr_or_key(
     assert output_secret not in logs
     assert stderr_secret not in logs
     assert API_KEY not in logs
+
+
+def test_discards_high_frequency_streaming_events_without_rejecting_run(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    script = _write_rpc_script(
+        tmp_path,
+        """
+        emit({"type": "response", "id": prompt["id"], "command": "prompt", "success": True})
+        for _index in range(10_050):
+            emit({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "text_delta",
+                    "contentIndex": 0,
+                    "delta": "x",
+                },
+            })
+        emit({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "stopReason": "stop",
+            },
+        })
+        emit({"type": "agent_settled"})
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    result = asyncio.run(
+        _client(tmp_path, script, timeout_seconds=10).run("Implement the handler")
+    )
+
+    assert result.final_text == "done"
+    assert [event["type"] for event in result.events] == [
+        "response",
+        "message_end",
+        "agent_settled",
+    ]
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event_count=10053" in logs
+    assert "retained_event_count=3" in logs
+    assert "streaming_event_count=10050" in logs
+
+
+def test_rejects_excessive_non_streaming_events(tmp_path: Path) -> None:
+    script = _write_rpc_script(
+        tmp_path,
+        """
+        emit({"type": "response", "id": prompt["id"], "command": "prompt", "success": True})
+        for _index in range(10_000):
+            emit({"type": "turn_start"})
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+
+    with pytest.raises(PiRpcProtocolError, match="emitted too many events"):
+        asyncio.run(
+            _client(tmp_path, script, timeout_seconds=10).run("Implement the handler")
+        )
 
 
 def test_logs_timeout_category_and_progress_without_payload_text(
