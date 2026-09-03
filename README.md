@@ -3,13 +3,13 @@
 一个用 Python 实现的可自扩展 Agent。处理器可以由直接 LLM 调用或
 [Pi Coding Agent](https://github.com/earendil-works/pi) RPC 后端生成。它有两个平面：
 
-- **业务面**：用户调用动态 API，例如 `GET /hello`。
+- **业务面**：用户调用带项目命名空间的动态 API，例如 `GET /default/hello`。
 - **管理面**：管理员用自然语言要求 LLM 新增或修改 API；生成物验证通过后，无需重启进程即可生效。
 - **开发控制台**：在 `/console` 保存需求、触发实现、查看 SQLite 时间线和调用已发布 API。
 
 所有 JSON API（业务面、管理面和健康检查）的成功响应统一为 `{"code": 0, "message": "OK", "data": ...}`；实际返回值位于 `data`。失败响应也使用这三个字段，`code` 为 HTTP 状态码、`data` 为 `null`。`/healthz` 在 `data.event_time` 返回调用时的北京时间（`+08:00`）。
 
-每个动态 API 还带有 `project` 逻辑分组。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名；控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。项目是逻辑分组，不是 URL 命名空间，因此跨项目也不能重复使用相同的 HTTP 方法和路径；升级前的路由与需求会归入 `default`。
+每个动态 API 都使用 `project` 作为 URL 命名空间。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名和相对路径 `/orders`，公开地址即为 `/customer-portal/orders`；默认项目也显式使用 `/default` 前缀。控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。
 
 管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。直接创建路由会先在 SQLite 保存一个需求任务并返回 `202 Accepted`，LLM 在后台生成、校验和热加载；可轮询任务状态，避免管理请求长时间占用连接。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；操作系统支持时还会限制内存与 CPU。
 
@@ -69,12 +69,13 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
   "code": 0,
   "message": "OK",
   "data": {
-    "operation_id": "<requirement-id>",
+    "requirement_id": "<requirement-id>",
+    "operation_id": "<operation-id>",
     "status": "accepted",
     "project": "quickstart",
-    "path": "/hello",
+    "path": "/quickstart/hello",
     "method": "GET",
-    "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+    "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
 ```
@@ -82,14 +83,14 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
 轮询 `data.operation_url`，直到 `data.status` 为 `finish`；若为 `failed`，请查看 `data.last_error` 并修改后重试：
 
 ```bash
-curl "http://127.0.0.1:8000/api/v1/manage/requirements/<requirement-id>" \
+curl "http://127.0.0.1:8000/api/v1/manage/operations/<operation-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
 任务激活后调用业务 API：
 
 ```bash
-curl 'http://127.0.0.1:8000/hello'
+curl 'http://127.0.0.1:8000/quickstart/hello'
 ```
 
 业务响应会统一封装生成处理器的结果：
@@ -102,7 +103,7 @@ curl 'http://127.0.0.1:8000/hello'
 
 更新使用 `expected_version` 做并发比较；版本已经变化时返回 `409`，避免覆盖其他管理请求的结果。
 
-如果修改的是一个已有需求，可将编辑和生成合并为一次异步请求。它返回 `202 Accepted`，随后轮询返回的 `data.operation_url`：
+如果修改的是一个已有需求，可将编辑和生成合并为一次异步请求。每次调用都会生成新的 `operation_id`，但 `requirement_id` 保持不变。服务在接收任务时自动绑定当前路由版本；只有生成期间路由又被其他请求更新，发布时才会报告版本冲突。它返回 `202 Accepted`，随后轮询 `data.operation_url`：
 
 ```bash
 curl -sS -X POST \
@@ -116,7 +117,7 @@ curl -sS -X POST \
 ```
 
 ```bash
-curl -X PUT 'http://127.0.0.1:8000/api/v1/manage/routes/get-hello' \
+curl -X PUT 'http://127.0.0.1:8000/api/v1/manage/routes/<route-id>' \
   -H 'Content-Type: application/json' \
   -H "X-Management-Key: $MANAGEMENT_API_KEY" \
   -d '{
@@ -124,7 +125,7 @@ curl -X PUT 'http://127.0.0.1:8000/api/v1/manage/routes/get-hello' \
     "expected_version": 1
   }'
 
-curl 'http://127.0.0.1:8000/hello?name=Tom'
+curl 'http://127.0.0.1:8000/quickstart/hello?name=Tom'
 ```
 
 查看当前动态路由：
@@ -143,8 +144,11 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `GET` | `/api/v1/manage/routes?project={project}` | 列出动态路由，可按项目筛选 |
 | `POST` | `/api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 |
 | `PUT` | `/api/v1/manage/routes/{route_id}` | 通过 LLM 更新动态路由 |
+| `POST` | `/api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移路由 |
+| `GET` | `/api/v1/manage/operations?requirement_id={id}` | 查看执行记录 |
+| `GET` | `/api/v1/manage/operations/{id}` | 查询一次异步执行的状态 |
 | `GET/POST` | `/api/v1/manage/requirements?project={project}` | 列出或保存 SQLite 需求元数据，可按项目筛选 |
-| `GET` | `/api/v1/manage/requirements/{id}` | 查询后台路由任务或需求的当前状态 |
+| `GET` | `/api/v1/manage/requirements/{id}` | 查询稳定的需求定义及最新状态 |
 | `PATCH` | `/api/v1/manage/requirements/{id}` | 编辑需求草稿 |
 | `POST` | `/api/v1/manage/requirements/{id}/revise-and-implement` | 保存修改并异步生成，返回 `202` 回执 |
 | `POST` | `/api/v1/manage/requirements/{id}/implement` | 生成、校验并发布需求 |
@@ -156,7 +160,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 ```python
 {
     "method": "GET",
-    "path": "/hello",
+    "path": "/quickstart/hello",
     "query": {"name": "Tom"},
     "headers": {"accept": "*/*"},
     "body": None,

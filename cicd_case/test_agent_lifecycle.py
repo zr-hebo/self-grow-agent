@@ -60,12 +60,12 @@ def _wait_for_route_task(agent_stack, accepted):
     deadline = time.monotonic() + 10
     client = agent_stack.require_client()
     while time.monotonic() < deadline:
-        requirement = client.get(
+        operation_response = client.get(
             operation["operation_url"],
             headers=agent_stack.management_headers,
         )
-        assert requirement.status_code == 200, requirement.text
-        result = api_data(requirement)
+        assert operation_response.status_code == 200, operation_response.text
+        result = api_data(operation_response)
         if result["status"] in {"finish", "failed"}:
             assert result["status"] == "finish", result
             return result
@@ -75,8 +75,13 @@ def _wait_for_route_task(agent_stack, accepted):
 
 def _update_hello(agent_stack, *, source: str, expected_version: int):
     agent_stack.stub.enqueue_handler(source, f"CICD hello v{expected_version + 1}")
-    return agent_stack.require_client().put(
-        "/api/v1/manage/routes/get-hello",
+    client = agent_stack.require_client()
+    routes = api_data(
+        client.get("/api/v1/manage/routes", headers=agent_stack.management_headers)
+    )
+    hello_route = next(route for route in routes if route["path"] == "/default/hello")
+    return client.put(
+        f"/api/v1/manage/routes/{hello_route['route_id']}",
         headers=agent_stack.management_headers,
         json={
             "instruction": f"Update the CICD greeting to v{expected_version + 1}",
@@ -108,17 +113,19 @@ def test_dynamic_hello_create(agent_stack) -> None:
     assert accepted.status_code == 202, accepted.text
     operation = api_data(accepted)
     assert operation == {
+        "requirement_id": operation["requirement_id"],
         "operation_id": operation["operation_id"],
         "status": "accepted",
         "project": "default",
-        "path": "/hello",
+        "path": "/default/hello",
         "method": "GET",
-        "operation_url": f"/api/v1/manage/requirements/{operation['operation_id']}",
+        "operation_url": f"/api/v1/manage/operations/{operation['operation_id']}",
     }
+    assert operation["requirement_id"] != operation["operation_id"]
     completed = _wait_for_route_task(agent_stack, accepted)
-    assert completed["route_id"] == "get-hello"
-    assert completed["route_version"] == 1
-    hello = agent_stack.require_client().get("/hello")
+    assert completed["target_route_id"]
+    assert completed["target_route_version"] == 1
+    hello = agent_stack.require_client().get("/default/hello")
     assert hello.status_code == 200
     assert hello.json() == {
         "code": 0,
@@ -148,7 +155,7 @@ def test_concurrent_business_requests(agent_stack) -> None:
     def send_request(request_id: str):
         start_barrier.wait(timeout=5)
         return request_id, client.get(
-            "/concurrent-echo",
+            "/default/concurrent-echo",
             params={"request_id": request_id},
         )
 
@@ -204,8 +211,8 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     )
     completed = _wait_for_route_task(agent_stack, implemented)
     assert completed["status"] == "finish"
-    assert completed["route_version"] == 1
-    assert client.get("/console-hello").json() == {
+    assert completed["target_route_version"] == 1
+    assert client.get("/default/console-hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello v1"},
@@ -236,7 +243,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
     assert api_data(restored)[0]["id"] == requirement_id
     assert api_data(restored)[0]["status"] == "finish"
     assert api_data(restored)[0]["route_version"] == 1
-    assert agent_stack.require_client().get("/console-hello").json() == {
+    assert agent_stack.require_client().get("/default/console-hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello v1"},
@@ -252,8 +259,10 @@ def test_hot_reload_update(agent_stack) -> None:
 
     assert updated.status_code == 200, updated.text
     assert api_data(updated)["version"] == 2
-    immediate = agent_stack.require_client().get("/hello", params={"name": "Codex"})
-    default = agent_stack.require_client().get("/hello")
+    immediate = agent_stack.require_client().get(
+        "/default/hello", params={"name": "Codex"}
+    )
+    default = agent_stack.require_client().get("/default/hello")
     assert immediate.status_code == 200
     assert immediate.json() == {
         "code": 0,
@@ -272,14 +281,20 @@ def test_hot_reload_update(agent_stack) -> None:
     assert HELLO_V1.strip() in agent_stack.stub.requests[1]["input"]
 
     llm_request_count = len(agent_stack.stub.requests)
+    routes = api_data(
+        agent_stack.require_client().get(
+            "/api/v1/manage/routes", headers=agent_stack.management_headers
+        )
+    )
+    route_id = next(route["route_id"] for route in routes if route["path"] == "/default/hello")
     stale = agent_stack.require_client().put(
-        "/api/v1/manage/routes/get-hello",
+        f"/api/v1/manage/routes/{route_id}",
         headers=agent_stack.management_headers,
         json={"instruction": "This stale update must not run", "expected_version": 1},
     )
     assert stale.status_code == 409
     assert len(agent_stack.stub.requests) == llm_request_count
-    assert agent_stack.require_client().get("/hello").json() == {
+    assert agent_stack.require_client().get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello world v2"},
@@ -295,7 +310,7 @@ def test_failed_update_rollback(agent_stack) -> None:
     failed = _update_hello(agent_stack, source=UNSAFE_V3, expected_version=2)
 
     assert failed.status_code == 422, failed.text
-    active = agent_stack.require_client().get("/hello")
+    active = agent_stack.require_client().get("/default/hello")
     assert active.status_code == 200
     assert active.json() == {
         "code": 0,
@@ -307,10 +322,11 @@ def test_failed_update_rollback(agent_stack) -> None:
     )
     assert routes.status_code == 200
     assert api_data(routes)[0]["version"] == 2
-    assert not (agent_stack.generated_dir / "get-hello.v3.py").exists()
+    route_id = api_data(routes)[0]["route_id"]
+    assert not (agent_stack.generated_dir / f"{route_id}.v3.py").exists()
     manifest = json.loads((agent_stack.generated_dir / "routes.json").read_text(encoding="utf-8"))
     assert manifest["routes"][0]["version"] == 2
-    assert manifest["routes"][0]["source_file"] == "get-hello.v2.py"
+    assert manifest["routes"][0]["source_file"] == f"{route_id}.v2.py"
 
 
 def test_restart_recovery(agent_stack) -> None:
@@ -324,7 +340,9 @@ def test_restart_recovery(agent_stack) -> None:
 
     assert agent_stack.pid != original_pid
     assert not agent_stack.stub.running
-    restored = agent_stack.require_client().get("/hello", params={"name": "Restart"})
+    restored = agent_stack.require_client().get(
+        "/default/hello", params={"name": "Restart"}
+    )
     assert restored.status_code == 200
     assert restored.json() == {
         "code": 0,

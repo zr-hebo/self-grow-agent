@@ -26,7 +26,7 @@ uv run python --version
 ## 从 clone 到第一个功能
 
 下面的流程从一个空目录开始，使用 DeepSeek 让 Agent 创建并立即运行第一个
-`GET /hello` 业务 API。示例默认使用直接 LLM 后端，不需要安装 Pi。
+`GET /quickstart/hello` 业务 API。示例默认使用直接 LLM 后端，不需要安装 Pi。
 
 ### 1. 获取代码并安装依赖
 
@@ -85,19 +85,20 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   }'
 ```
 
-成功时先返回 HTTP `202 Accepted`，其中 `data.operation_id` 是 SQLite 持久化的后台任务 ID，`data.operation_url` 可用于查询状态。LLM 的生成、校验和热加载在后台继续执行，因此这次管理请求不会一直等待模型完成：
+成功时先返回 HTTP `202 Accepted`。`requirement_id` 标识可持续编辑的需求，`operation_id` 标识本次独立执行；`operation_url` 用于查询本次执行状态。LLM 的生成、校验和热加载在后台继续执行，因此管理请求不会一直等待模型完成：
 
 ```json
 {
   "code":0,
   "message":"OK",
   "data":{
-    "operation_id":"<requirement-id>",
+    "requirement_id":"<requirement-id>",
+    "operation_id":"<operation-id>",
     "status":"accepted",
     "project":"quickstart",
-    "path":"/hello",
+    "path":"/quickstart/hello",
     "method":"GET",
-    "operation_url":"/api/v1/manage/requirements/<requirement-id>"
+    "operation_url":"/api/v1/manage/operations/<operation-id>"
   }
 }
 ```
@@ -105,14 +106,14 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
 轮询 `data.operation_url`，直到 `data.status` 为 `finish`。若状态为 `failed`，查看 `data.last_error` 并调整需求后重试：
 
 ```bash
-curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
+curl -sS "$AGENT_URL/api/v1/manage/operations/<operation-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
 任务激活后即可访问刚刚创建的功能：
 
 ```bash
-curl -sS "$AGENT_URL/hello"
+curl -sS "$AGENT_URL/quickstart/hello"
 ```
 
 预期响应：
@@ -260,14 +261,17 @@ Agent 把 API 分为两个平面：
 | 管理面 | `GET /api/v1/manage/routes?project={project}` | 查看动态路由，可按项目筛选 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 | 必须提供 `X-Management-Key` |
 | 管理面 | `PUT /api/v1/manage/routes/{route_id}` | 让 LLM 替换现有路由逻辑 | 必须提供 `X-Management-Key` |
+| 管理面 | `POST /api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移现有路由 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET /api/v1/manage/operations?requirement_id={id}` | 查看需求的执行历史 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET /api/v1/manage/operations/{id}` | 查询一次异步执行状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET/POST /api/v1/manage/requirements?project={project}` | 列出或保存开发需求，可按项目筛选 | 必须提供 `X-Management-Key` |
-| 管理面 | `GET /api/v1/manage/requirements/{id}` | 查询一个后台路由任务或需求状态 | 必须提供 `X-Management-Key` |
+| 管理面 | `GET /api/v1/manage/requirements/{id}` | 查询稳定的需求定义及最新状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `PATCH /api/v1/manage/requirements/{id}` | 编辑需求内容 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/revise-and-implement` | 保存修改并异步生成，返回 `202` 回执 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/implement` | 实现需求并关联路由版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/requirements/{id}/rebase` | 显式同步关联路由的最新版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/requirements/{id}/events` | 查看追加式实现时间线 | 必须提供 `X-Management-Key` |
-| 业务面 | 例如 `GET /hello` | 执行已经发布的动态处理器 | 当前实现不要求管理密钥 |
+| 业务面 | 例如 `GET /default/hello` | 执行已经发布的动态处理器 | 当前实现不要求管理密钥 |
 
 管理面接收自然语言指令并发布代码；业务面只运行已经通过校验并激活的处理器。动态业务路由支持 `GET`、`POST`、`PUT`、`PATCH` 和 `DELETE`，并按 HTTP 方法和标准化后的完整路径精确匹配。
 
@@ -275,7 +279,7 @@ Agent 把 API 分为两个平面：
 
 创建动态 API 或控制台需求时应填写 `project`，例如 `customer-portal` 或 `billing`。项目名会标准化为小写，必须以字母开头，只能包含小写字母、数字和连字符，最长 63 个字符。创建成功的管理响应会返回规范化后的 `project`。运行时、SQLite 需求记录和控制台会按该字段归类；`GET /api/v1/manage/routes?project=billing` 和 `GET /api/v1/manage/requirements?project=billing` 可只查询一个项目的数据。
 
-项目是逻辑分组，不是 URL 命名空间：不同项目仍不能发布相同的 HTTP 方法和路径。升级前已存在的路由和需求会自动归入 `default` 项目，保持可恢复性。
+项目同时是逻辑分组和 URL 命名空间：项目 `billing` 的相对路径 `/orders` 发布为 `/billing/orders`，默认项目的 `/hello` 发布为 `/default/hello`。已有根路由可通过 `/api/v1/manage/routes/{route_id}/move` 异步重新生成并迁移。
 
 所有 JSON API 的成功响应由 Agent 统一封装；业务处理器 `handle(request)` 或管理 API 的实际返回值始终放在 `data` 中：
 
@@ -299,7 +303,7 @@ Agent 把 API 分为两个平面：
 
 并发请求在进入动态分发器时取得不可变路由版本快照。某个请求执行期间即使管理 API 发布了新版本，该在途请求仍安全完成旧版本；发布完成后到达的新请求使用新版本，不需要重启服务。
 
-## 示例：让 Agent 自动添加 `GET /hello`
+## 示例：让 Agent 自动添加 `GET /demo/hello`
 
 以下命令假定第二个终端已经通过秘密管理器或其他安全方式注入了启动服务时使用的同一个 `MANAGEMENT_API_KEY`；不要在命令或文件中写死该值：
 
@@ -324,29 +328,30 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   "code": 0,
   "message": "OK",
   "data": {
-    "operation_id": "<requirement-id>",
+    "requirement_id": "<requirement-id>",
+    "operation_id": "<operation-id>",
     "status": "accepted",
     "project": "demo",
-    "path": "/hello",
+    "path": "/demo/hello",
     "method": "GET",
-    "operation_url": "/api/v1/manage/requirements/<requirement-id>"
+    "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
 ```
 
-`data.operation_id` 是持久化的需求任务 ID；路径、方法和项目已经完成标准化。`data.status=accepted` 只表示服务已接收任务。通过 `data.operation_url` 轮询，直到返回中的 `data.status` 变为 `finish`；若变为 `failed`，可读取安全的 `data.last_error` 摘要。
+`data.requirement_id` 在后续多次修改中保持稳定；每次创建、迁移或 `revise-and-implement` 都产生新的 `data.operation_id`。`data.status=accepted` 只表示服务已接收本次任务。通过 `data.operation_url` 轮询，直到状态变为 `finish`；若变为 `failed`，可读取安全的 `last_error` 摘要。
 
 例如，使用响应中的实际任务 ID 查询：
 
 ```bash
-curl -sS "$AGENT_URL/api/v1/manage/requirements/<requirement-id>" \
+curl -sS "$AGENT_URL/api/v1/manage/operations/<operation-id>" \
   -H "X-Management-Key: $MANAGEMENT_API_KEY"
 ```
 
 任务状态为 `finish` 后，路由已经生效，可以调用：
 
 ```bash
-curl -sS "$AGENT_URL/hello"
+curl -sS "$AGENT_URL/demo/hello"
 ```
 
 预期业务响应：
@@ -370,7 +375,7 @@ curl -sS -X POST \
   }'
 ```
 
-响应为 HTTP `202 Accepted`，`data.operation_url` 仍是该需求的查询地址。轮询直到 `data.status` 为 `finish` 或 `failed`。任务处于 `implementing` 时再次修改会返回 `409`，避免并发请求覆盖正在生成的版本。
+响应为 HTTP `202 Accepted`，稳定的 `requirement_id` 不变，本次调用返回新的 `operation_id` 和对应查询地址。服务自动读取并绑定当前路由版本，无需手动 rebase；如果生成期间路由再次变化，本次 operation 会以真实版本冲突失败。存在 `accepted` 或 `implementing` operation 时再次修改会返回 `409`。
 
 ## 查看路由并热更新处理逻辑
 
@@ -388,8 +393,8 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
   "code": 0,
   "message": "OK",
   "data": [{
-    "route_id": "get-hello",
-    "path": "/hello",
+    "route_id": "<route-id>",
+    "path": "/demo/hello",
     "method": "GET",
     "project": "demo",
     "version": 1,
@@ -401,7 +406,7 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
 更新时必须传入列表中看到的当前 `version` 作为 `expected_version`：
 
 ```bash
-curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/get-hello" \
+curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/<route-id>" \
   -H 'Content-Type: application/json' \
   -H "X-Management-Key: $MANAGEMENT_API_KEY" \
   -d '{
@@ -417,8 +422,8 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/get-hello" \
   "code": 0,
   "message": "OK",
   "data": {
-    "route_id": "get-hello",
-    "path": "/hello",
+    "route_id": "<route-id>",
+    "path": "/demo/hello",
     "method": "GET",
     "project": "demo",
     "version": 2,
@@ -430,8 +435,8 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/get-hello" \
 无需停止或重启 Agent，新逻辑会立即处理后续请求：
 
 ```bash
-curl -sS "$AGENT_URL/hello?name=Tom"
-curl -sS "$AGENT_URL/hello"
+curl -sS "$AGENT_URL/demo/hello?name=Tom"
+curl -sS "$AGENT_URL/demo/hello"
 ```
 
 预期分别返回：

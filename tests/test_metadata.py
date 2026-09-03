@@ -337,3 +337,132 @@ def test_moving_route_links_updates_inactive_requirements(store: RequirementStor
     assert moved.route_version == 2
     assert moved.path == "/binlog-server/rebuild_replication"
     assert moved.project == "binlog-server"
+
+
+def test_each_requirement_execution_has_a_distinct_persisted_operation(
+    store: RequirementStore,
+) -> None:
+    requirement = store.create(
+        "Greeting",
+        "Say hello",
+        "/default/hello",
+        "GET",
+        route_id="get-default-hello",
+        route_version=3,
+    )
+
+    first = store.create_operation(
+        requirement.id,
+        kind="update",
+        instruction="Say hello v2",
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+        base_route_id=requirement.route_id,
+        base_route_version=3,
+    )
+    store.begin_operation(first.id)
+    store.prepare_operation_publication(
+        first.id,
+        route_id="get-default-hello",
+        route_version=4,
+        source_sha256=SOURCE_SHA256,
+    )
+    store.complete_operation(
+        first.id,
+        route_id="get-default-hello",
+        route_version=4,
+    )
+    second = store.create_operation(
+        requirement.id,
+        kind="update",
+        instruction="Say hello v3",
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+        base_route_id=requirement.route_id,
+        base_route_version=4,
+    )
+
+    assert first.id != requirement.id
+    assert second.id not in {requirement.id, first.id}
+    assert store.get_operation(first.id).status == "finish"
+    assert store.get_operation(second.id).status == "accepted"
+    assert store.get_operation(second.id).base_route_version == 4
+    assert [item.id for item in store.list_operations(requirement.id)] == [
+        second.id,
+        first.id,
+    ]
+
+
+def test_revision_and_operation_creation_atomically_capture_current_route_version(
+    store: RequirementStore,
+) -> None:
+    requirement = store.create(
+        "Greeting v1",
+        "Say hello v1",
+        "/default/hello",
+        "GET",
+        route_id="get-default-hello",
+        route_version=3,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id="get-default-hello",
+        route_version=3,
+    )
+
+    operation = store.revise_and_create_operation(
+        requirement.id,
+        title="Greeting v2",
+        instruction="Say hello v2",
+        kind="update",
+        base_route_id="get-default-hello",
+        base_route_version=4,
+    )
+
+    revised = store.get(requirement.id)
+    assert operation.requirement_id == requirement.id
+    assert operation.id != requirement.id
+    assert operation.base_route_version == 4
+    assert revised.title == "Greeting v2"
+    assert revised.instruction == "Say hello v2"
+    assert revised.route_version == 4
+    assert revised.status == "draft"
+
+    with pytest.raises(RequirementBusyError, match="active operation"):
+        store.revise_and_create_operation(
+            requirement.id,
+            title="Must not overwrite",
+            instruction="Must not overwrite",
+            kind="update",
+            base_route_id="get-default-hello",
+            base_route_version=4,
+        )
+
+    unchanged = store.get(requirement.id)
+    assert unchanged.title == "Greeting v2"
+    assert unchanged.instruction == "Say hello v2"
+
+
+def test_recovery_marks_an_unpublished_operation_failed(
+    database_path: Path,
+) -> None:
+    store = RequirementStore(database_path)
+    requirement = store.create("Greeting", "Say hello", "/hello", "GET")
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+    )
+    store.begin_operation(operation.id)
+
+    store.recover_interrupted({})
+
+    recovered = store.get_operation(operation.id)
+    assert recovered.status == "failed"
+    assert recovered.last_error == INTERRUPTED_MESSAGE

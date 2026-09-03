@@ -39,6 +39,8 @@ from self_grow_agent.executor import (
 )
 from self_grow_agent.llm import FeatureGenerator, OpenAIFeatureGenerator
 from self_grow_agent.metadata import (
+    OperationNotFoundError,
+    OperationRecord,
     RequirementBusyError,
     RequirementEvent,
     RequirementNotFoundError,
@@ -373,12 +375,49 @@ class ApiResponse(BaseModel, Generic[ResponseData]):
 class RouteTaskResponse(BaseModel):
     """Receipt for a route-generation task accepted for background execution."""
 
+    requirement_id: str
     operation_id: str
     status: str = "accepted"
     project: str
     path: str
     method: str
     operation_url: str
+
+
+class OperationResponse(BaseModel):
+    id: str
+    requirement_id: str
+    kind: str
+    path: str
+    method: str
+    project: str
+    base_route_id: str | None
+    base_route_version: int | None
+    target_route_id: str | None
+    target_route_version: int | None
+    status: str
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, record: OperationRecord) -> "OperationResponse":
+        return cls(
+            id=record.id,
+            requirement_id=record.requirement_id,
+            kind=record.kind,
+            path=record.path,
+            method=record.method,
+            project=record.project,
+            base_route_id=record.base_route_id,
+            base_route_version=record.base_route_version,
+            target_route_id=record.target_route_id,
+            target_route_version=record.target_route_version,
+            status=record.status,
+            last_error=record.last_error,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+        )
 
 
 class RequirementResponse(BaseModel):
@@ -512,7 +551,11 @@ def _route_requirement_title(project: str, method: str, path: str) -> str:
 def _public_route_path(project: str, path: str) -> str:
     """Map a project-relative management path to its public business path."""
 
-    normalized_path = normalize_path(path)
+    # Reject management/system paths in the caller's project-relative namespace
+    # before adding a project prefix. This keeps `/healthz` and `/console`
+    # unavailable as user-defined business API names even though the final URL
+    # would not collide with their root endpoints.
+    normalized_path, _ = RouteRuntime.validate_route(path, "GET")
     return f"/{project}{normalized_path}"
 
 
@@ -713,6 +756,16 @@ def create_app(
             content=_api_error(status.HTTP_404_NOT_FOUND, "requirement not found"),
         )
 
+    @app.exception_handler(OperationNotFoundError)
+    async def operation_not_found_handler(
+        request: Request, exc: Exception
+    ) -> JSONResponse:
+        del request, exc
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content=_api_error(status.HTTP_404_NOT_FOUND, "operation not found"),
+        )
+
     @app.exception_handler(RequirementBusyError)
     async def requirement_busy_handler(request: Request, exc: Exception) -> JSONResponse:
         del request
@@ -841,23 +894,35 @@ def create_app(
             normalized_method,
             project=payload.project,
         )
+        operation = await asyncio.to_thread(
+            active_requirement_store.create_operation,
+            requirement.id,
+            kind="create",
+            instruction=requirement.instruction,
+            path=requirement.path,
+            method=requirement.method,
+            project=requirement.project,
+        )
         _logger.info(
             "route_task accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
-            requirement.id,
+            operation.id,
             requirement.project,
             requirement.method,
             requirement.path,
             _instruction_for_log(payload.instruction),
         )
-        task = asyncio.create_task(run_requirement_implementation(requirement.id))
+        task = asyncio.create_task(
+            run_requirement_implementation(requirement.id, operation.id)
+        )
         task.add_done_callback(consume_implementation_result)
         return _api_success(
             RouteTaskResponse(
-                operation_id=requirement.id,
+                requirement_id=requirement.id,
+                operation_id=operation.id,
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
-                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+                operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
 
@@ -918,24 +983,66 @@ def create_app(
             route_id=current.route_id,
             route_version=current.version,
         )
+        operation = await asyncio.to_thread(
+            active_requirement_store.create_operation,
+            requirement.id,
+            kind="move",
+            instruction=requirement.instruction,
+            path=requirement.path,
+            method=requirement.method,
+            project=requirement.project,
+            base_route_id=current.route_id,
+            base_route_version=current.version,
+        )
         _logger.info(
             "route_move accepted operation_id=%s route_id=%s project=%s method=%s path=%s",
-            requirement.id,
+            operation.id,
             current.route_id,
             requirement.project,
             requirement.method,
             requirement.path,
         )
-        start_requirement_implementation(requirement.id)
+        start_requirement_implementation(requirement.id, operation.id)
         return _api_success(
             RouteTaskResponse(
-                operation_id=requirement.id,
+                requirement_id=requirement.id,
+                operation_id=operation.id,
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
-                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+                operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
+
+    @app.get(
+        "/api/v1/manage/operations",
+        response_model=ApiResponse[list[OperationResponse]],
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def list_operations(
+        requirement_id: str | None = None,
+    ) -> dict[str, Any]:
+        operations = await asyncio.to_thread(
+            active_requirement_store.list_operations,
+            requirement_id,
+        )
+        return _api_success(
+            [OperationResponse.from_record(operation) for operation in operations]
+        )
+
+    @app.get(
+        "/api/v1/manage/operations/{operation_id}",
+        response_model=ApiResponse[OperationResponse],
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def get_operation(operation_id: str) -> dict[str, Any]:
+        operation = await asyncio.to_thread(
+            active_requirement_store.get_operation,
+            operation_id,
+        )
+        return _api_success(OperationResponse.from_record(operation))
 
     @app.get(
         "/api/v1/manage/requirements",
@@ -1125,19 +1232,48 @@ def create_app(
 
     async def run_requirement_implementation(
         requirement_id: str,
+        operation_id: str | None = None,
     ) -> RequirementRecord:
         started_at = time.monotonic()
-        requirement = await asyncio.to_thread(
-            active_requirement_store.begin_implementation,
-            requirement_id,
+        operation: OperationRecord | None = None
+        if operation_id is None:
+            requirement = await asyncio.to_thread(
+                active_requirement_store.begin_implementation,
+                requirement_id,
+            )
+        else:
+            operation = await asyncio.to_thread(
+                active_requirement_store.begin_operation,
+                operation_id,
+            )
+            requirement = await asyncio.to_thread(
+                active_requirement_store.get,
+                requirement_id,
+            )
+        work_id = operation.id if operation is not None else requirement.id
+        work_instruction = (
+            operation.instruction if operation is not None else requirement.instruction
+        )
+        work_path = operation.path if operation is not None else requirement.path
+        work_method = operation.method if operation is not None else requirement.method
+        work_project = operation.project if operation is not None else requirement.project
+        base_route_id = (
+            operation.base_route_id if operation is not None else requirement.route_id
+        )
+        base_route_version = (
+            operation.base_route_version
+            if operation is not None
+            else requirement.route_version
         )
         _logger.info(
             "route_task generation_started operation_id=%s project=%s method=%s path=%s mode=%s",
-            requirement.id,
-            requirement.project,
-            requirement.method,
-            requirement.path,
-            "update" if requirement.route_id is not None else "create",
+            work_id,
+            work_project,
+            work_method,
+            work_path,
+            operation.kind
+            if operation is not None
+            else ("update" if base_route_id is not None else "create"),
         )
 
         async def prepare_publication(
@@ -1152,36 +1288,48 @@ def create_app(
                 route_version=route_version,
                 source_sha256=_source_sha256(source),
             )
+            if operation is not None:
+                await asyncio.to_thread(
+                    active_requirement_store.prepare_operation_publication,
+                    operation.id,
+                    route_id=route_id,
+                    route_version=route_version,
+                    source_sha256=_source_sha256(source),
+                )
             _logger.info(
                 "route_task generation_completed operation_id=%s route_id=%s version=%s; validating and publishing",
-                requirement_id,
+                work_id,
                 route_id,
                 route_version,
             )
 
         try:
-            if requirement.route_id is None:
+            if base_route_id is None:
                 route = await service.create_route(
-                    path=requirement.path,
-                    method=requirement.method,
-                    project=requirement.project,
-                    instruction=requirement.instruction,
+                    path=work_path,
+                    method=work_method,
+                    project=work_project,
+                    instruction=work_instruction,
                     before_publish=prepare_publication,
                 )
             else:
-                if requirement.route_version is None:
+                if base_route_version is None:
                     raise RequirementStorageError(
                         "linked requirement has no route version"
                     )
-                current_route = active_runtime.get(requirement.route_id)
+                current_route = active_runtime.get(base_route_id)
                 if current_route is None:
                     raise ManagedRouteNotFoundError("managed route not found")
                 is_route_move = (
-                    current_route.path != requirement.path
-                    or current_route.project != requirement.project
+                    operation.kind == "move"
+                    if operation is not None
+                    else (
+                        current_route.path != work_path
+                        or current_route.project != work_project
+                    )
                 )
                 if is_route_move:
-                    if current_route.method != requirement.method:
+                    if current_route.method != work_method:
                         raise RouteValidationError(
                             "a route move cannot change the HTTP method"
                         )
@@ -1192,10 +1340,10 @@ def create_app(
                     )
                     route = await service.move_route(
                         route_id=current_route.route_id,
-                        path=requirement.path,
-                        project=requirement.project,
-                        instruction=requirement.instruction,
-                        expected_version=requirement.route_version,
+                        path=work_path,
+                        project=work_project,
+                        instruction=work_instruction,
+                        expected_version=base_route_version,
                         before_publish=prepare_publication,
                     )
                     await asyncio.to_thread(
@@ -1209,17 +1357,23 @@ def create_app(
                     )
                 else:
                     route = await service.update_route(
-                        route_id=requirement.route_id,
-                        instruction=requirement.instruction,
-                        expected_version=requirement.route_version,
+                        route_id=base_route_id,
+                        instruction=work_instruction,
+                        expected_version=base_route_version,
                         before_publish=prepare_publication,
                     )
         except Exception as exc:
             safe_error = _safe_requirement_error(exc)
             await fail_requirement(requirement_id, safe_error)
+            if operation is not None:
+                await asyncio.to_thread(
+                    active_requirement_store.fail_operation,
+                    operation.id,
+                    safe_error,
+                )
             _logger.warning(
                 "route_task failed operation_id=%s stage=generation_or_publication error=%s elapsed_seconds=%.3f",
-                requirement_id,
+                work_id,
                 safe_error,
                 time.monotonic() - started_at,
             )
@@ -1229,10 +1383,17 @@ def create_app(
         # the exact version and source hash without another LLM call.
         try:
             completed = await finalize_requirement(requirement_id, route)
+            if operation is not None:
+                await asyncio.to_thread(
+                    active_requirement_store.complete_operation,
+                    operation.id,
+                    route_id=route.route_id,
+                    route_version=route.version,
+                )
         except Exception:
             _logger.warning(
                 "route_task finalization_pending operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
-                requirement_id,
+                work_id,
                 route.route_id,
                 route.version,
                 time.monotonic() - started_at,
@@ -1240,7 +1401,7 @@ def create_app(
             raise
         _logger.info(
             "route_task completed operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
-            requirement_id,
+            work_id,
             completed.route_id,
             completed.route_version,
             time.monotonic() - started_at,
@@ -1251,11 +1412,14 @@ def create_app(
         if not task.cancelled():
             task.exception()
 
-    def start_requirement_implementation(requirement_id: str) -> None:
+    def start_requirement_implementation(
+        requirement_id: str,
+        operation_id: str | None = None,
+    ) -> None:
         """Schedule persisted requirement work without holding a management request."""
 
         implementation_task = asyncio.create_task(
-            run_requirement_implementation(requirement_id)
+            run_requirement_implementation(requirement_id, operation_id)
         )
         implementation_task.add_done_callback(consume_implementation_result)
 
@@ -1274,28 +1438,57 @@ def create_app(
 
         if active_generator is None:
             raise LLMUnavailableError("LLM is not configured")
-        requirement = await asyncio.to_thread(
-            active_requirement_store.update_content,
+        current_requirement = await asyncio.to_thread(
+            active_requirement_store.get,
+            requirement_id,
+        )
+        current_route: RouteRecord | None = None
+        operation_kind = "create"
+        if current_requirement.route_id is not None:
+            current_route = active_runtime.get(current_requirement.route_id)
+            if current_route is None:
+                raise ManagedRouteNotFoundError("managed route not found")
+            if (
+                current_route.path != current_requirement.path
+                or current_route.method != current_requirement.method
+                or current_route.project != current_requirement.project
+            ):
+                raise RouteValidationError(
+                    "linked route does not match the requirement project, method, and path"
+                )
+            operation_kind = "update"
+        operation = await asyncio.to_thread(
+            active_requirement_store.revise_and_create_operation,
             requirement_id,
             title=payload.title,
             instruction=payload.instruction,
+            kind=operation_kind,
+            base_route_id=current_route.route_id if current_route is not None else None,
+            base_route_version=(
+                current_route.version if current_route is not None else None
+            ),
+        )
+        requirement = await asyncio.to_thread(
+            active_requirement_store.get,
+            requirement_id,
         )
         _logger.info(
             "route_task revision_accepted operation_id=%s project=%s method=%s path=%s instruction=%r",
-            requirement.id,
+            operation.id,
             requirement.project,
             requirement.method,
             requirement.path,
             _instruction_for_log(requirement.instruction),
         )
-        start_requirement_implementation(requirement.id)
+        start_requirement_implementation(requirement.id, operation.id)
         return _api_success(
             RouteTaskResponse(
-                operation_id=requirement.id,
+                requirement_id=requirement.id,
+                operation_id=operation.id,
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
-                operation_url=f"/api/v1/manage/requirements/{requirement.id}",
+                operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
 

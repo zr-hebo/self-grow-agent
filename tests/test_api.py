@@ -301,19 +301,19 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert api_data(created) == {
-        "route_id": "get-hello",
-        "path": "/hello",
+        "route_id": RouteRuntime.route_id_for("/default/hello", "GET"),
+        "path": "/default/hello",
         "method": "GET",
         "project": "default",
         "version": 1,
         "description": "Say hello",
     }
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello"},
     }
-    assert generator.calls[0]["path"] == "/hello"
+    assert generator.calls[0]["path"] == "/default/hello"
     assert generator.calls[0]["method"] == "GET"
 
 
@@ -354,7 +354,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
                 operation["operation_url"],
                 headers=management_headers(),
             )
-            assert api_data(in_progress)["status"] in {"draft", "implementing"}
+            assert api_data(in_progress)["status"] in {"accepted", "implementing"}
             generator.release.set()
             for _ in range(100):
                 completed = await client.get(
@@ -368,16 +368,22 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
 
     accepted, completed = asyncio.run(run_scenario())
 
-    assert api_data(accepted) == {
+    receipt = api_data(accepted)
+    assert receipt == {
+        "requirement_id": receipt["requirement_id"],
         "operation_id": api_data(completed)["id"],
         "status": "accepted",
         "project": "demo",
-        "path": "/hello",
+        "path": "/demo/hello",
         "method": "GET",
-        "operation_url": f"/api/v1/manage/requirements/{api_data(completed)['id']}",
+        "operation_url": f"/api/v1/manage/operations/{api_data(completed)['id']}",
     }
+    assert receipt["requirement_id"] != receipt["operation_id"]
     assert api_data(completed)["status"] == "finish"
-    assert api_data(completed)["route_id"] == "get-hello"
+    assert api_data(completed)["requirement_id"] == receipt["requirement_id"]
+    assert api_data(completed)["target_route_id"] == (
+        "get-h-demo-hello-234746bf43d57d53"
+    )
 
     task_logs = "\n".join(record.getMessage() for record in caplog.records)
     operation_id = api_data(completed)["id"]
@@ -437,35 +443,41 @@ def test_revise_and_implement_saves_the_draft_and_returns_before_generation(
             )
             assert accepted.status_code == 202
             assert await asyncio.wait_for(generator.started.wait(), timeout=1)
+            operation = api_data(accepted)
             in_progress = await client.get(
-                f"/api/v1/manage/requirements/{requirement.id}",
+                operation["operation_url"],
                 headers=management_headers(),
             )
             assert api_data(in_progress)["status"] == "implementing"
             generator.release.set()
             for _ in range(100):
                 completed = await client.get(
-                    f"/api/v1/manage/requirements/{requirement.id}",
+                    operation["operation_url"],
                     headers=management_headers(),
                 )
                 if api_data(completed)["status"] == "finish":
-                    return accepted, completed
+                    revised = await client.get(
+                        f"/api/v1/manage/requirements/{requirement.id}",
+                        headers=management_headers(),
+                    )
+                    return accepted, completed, revised
                 await asyncio.sleep(0.01)
         raise AssertionError("revised requirement did not finish")
 
-    accepted, completed = asyncio.run(run_scenario())
+    accepted, completed, revised = asyncio.run(run_scenario())
 
-    assert api_data(accepted) == {
-        "operation_id": requirement.id,
-        "status": "accepted",
-        "project": "default",
-        "path": "/hello",
-        "method": "GET",
-        "operation_url": f"/api/v1/manage/requirements/{requirement.id}",
-    }
-    assert api_data(completed)["title"] == "Greeting API v2"
-    assert api_data(completed)["instruction"] == "Return hello v2"
-    assert api_data(completed)["route_version"] == 2
+    receipt = api_data(accepted)
+    assert receipt["requirement_id"] == requirement.id
+    assert receipt["operation_id"] != requirement.id
+    assert receipt["operation_url"] == (
+        f"/api/v1/manage/operations/{receipt['operation_id']}"
+    )
+    assert api_data(completed)["requirement_id"] == requirement.id
+    assert api_data(completed)["base_route_version"] == 1
+    assert api_data(completed)["target_route_version"] == 2
+    assert api_data(revised)["title"] == "Greeting API v2"
+    assert api_data(revised)["instruction"] == "Return hello v2"
+    assert api_data(revised)["route_version"] == 2
     assert [event.to_status for event in store.list_events(requirement.id)] == [
         "draft",
         "implementing",
@@ -474,6 +486,223 @@ def test_revise_and_implement_saves_the_draft_and_returns_before_generation(
         "implementing",
         "active",
     ]
+
+
+def test_revise_and_implement_automatically_uses_the_current_route_version(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    version_one = runtime.create(
+        "/hello",
+        "GET",
+        'def handle(request):\n    return {"message": "v1"}\n',
+    )
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "Greeting",
+        "Return v1",
+        "/hello",
+        "GET",
+        route_id=version_one.route_id,
+        route_version=version_one.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=version_one.route_id,
+        route_version=version_one.version,
+    )
+    version_two_source = 'def handle(request):\n    return {"message": "v2"}\n'
+    runtime.update(version_one.route_id, version_two_source, expected_version=1)
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(
+            source='def handle(request):\n    return {"message": "v3"}\n',
+            description="Greeting v3",
+        )
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+            headers=management_headers(),
+            json={"title": "Greeting v3", "instruction": "Return v3"},
+        )
+        assert accepted.status_code == 202
+        receipt = api_data(accepted)
+        for _ in range(100):
+            operation = api_data(
+                client.get(receipt["operation_url"], headers=management_headers())
+            )
+            if operation["status"] == "finish":
+                break
+            time.sleep(0.01)
+
+        revised = api_data(
+            client.get(
+                f"/api/v1/manage/requirements/{requirement.id}",
+                headers=management_headers(),
+            )
+        )
+
+    assert receipt["operation_id"] != requirement.id
+    assert operation["base_route_version"] == 2
+    assert operation["target_route_version"] == 3
+    assert revised["route_version"] == 3
+    assert generator.calls[0]["current_source"] == version_two_source
+
+
+def test_each_revise_and_implement_call_creates_a_new_operation_id(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    original = runtime.create(
+        "/hello",
+        "GET",
+        'def handle(request):\n    return {"message": "v1"}\n',
+    )
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "Greeting v1",
+        "Return v1",
+        "/hello",
+        "GET",
+        route_id=original.route_id,
+        route_version=original.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=original.route_id,
+        route_version=original.version,
+    )
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(source='def handle(request):\n    return {"message": "v2"}\n'),
+        GeneratedHandler(source='def handle(request):\n    return {"message": "v3"}\n'),
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    def revise(client: TestClient, version: int) -> tuple[dict, dict]:
+        accepted = client.post(
+            f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+            headers=management_headers(),
+            json={
+                "title": f"Greeting v{version}",
+                "instruction": f"Return v{version}",
+            },
+        )
+        assert accepted.status_code == 202
+        receipt = api_data(accepted)
+        for _ in range(100):
+            operation = api_data(
+                client.get(receipt["operation_url"], headers=management_headers())
+            )
+            if operation["status"] == "finish":
+                return receipt, operation
+            time.sleep(0.01)
+        raise AssertionError("revision operation did not finish")
+
+    with TestClient(app) as client:
+        first_receipt, first_operation = revise(client, 2)
+        second_receipt, second_operation = revise(client, 3)
+
+    assert first_receipt["requirement_id"] == requirement.id
+    assert second_receipt["requirement_id"] == requirement.id
+    assert first_receipt["operation_id"] != second_receipt["operation_id"]
+    assert first_operation["base_route_version"] == 1
+    assert first_operation["target_route_version"] == 2
+    assert second_operation["base_route_version"] == 2
+    assert second_operation["target_route_version"] == 3
+
+
+def test_revise_operation_detects_a_real_publish_time_version_conflict(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    original = runtime.create(
+        "/hello",
+        "GET",
+        'def handle(request):\n    return {"message": "v1"}\n',
+    )
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "Greeting",
+        "Return v1",
+        "/hello",
+        "GET",
+        route_id=original.route_id,
+        route_version=original.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=original.route_id,
+        route_version=original.version,
+    )
+    generator = AsyncBlockingFeatureGenerator(
+        GeneratedHandler(source='def handle(request):\n    return {"message": "generated"}\n')
+    )
+    app = build_app(
+        settings=settings,
+        generator=generator,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        requirement_store=store,
+    )
+
+    async def run_scenario() -> dict[str, object]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            accepted = await client.post(
+                f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+                headers=management_headers(),
+                json={"title": "Greeting generated", "instruction": "Return generated"},
+            )
+            receipt = api_data(accepted)
+            assert await asyncio.wait_for(generator.started.wait(), timeout=1)
+            runtime.update(
+                original.route_id,
+                'def handle(request):\n    return {"message": "concurrent"}\n',
+                expected_version=1,
+            )
+            generator.release.set()
+            for _ in range(100):
+                operation = api_data(
+                    await client.get(
+                        receipt["operation_url"],
+                        headers=management_headers(),
+                    )
+                )
+                if operation["status"] == "failed":
+                    return operation
+                await asyncio.sleep(0.01)
+        raise AssertionError("conflicted operation did not fail")
+
+    failed = asyncio.run(run_scenario())
+
+    assert failed["base_route_version"] == 1
+    assert failed["last_error"] == (
+        "route 'get-hello' is version 2, not expected version 1"
+    )
+    assert runtime.get(original.route_id).version == 2
 
 
 def test_instruction_log_redacts_credential_values() -> None:
@@ -567,7 +796,7 @@ def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
     assert [route["project"] for route in api_data(routes)] == ["billing", "store"]
     assert api_data(filtered) == [
         {
-            "route_id": "get-store-orders",
+                "route_id": RouteRuntime.route_id_for("/store/orders", "GET"),
             "path": "/store/orders",
             "method": "GET",
             "project": "store",
@@ -683,7 +912,7 @@ def handle(request):
     assert api_data(accepted)["path"] == "/binlog-server/rebuild_replication"
     assert completed["path"] == "/binlog-server/rebuild_replication"
     assert completed["project"] == "binlog-server"
-    assert completed["route_version"] == 2
+    assert completed["target_route_version"] == 2
     assert generator.calls == [
         {
             "instruction": generator.calls[0]["instruction"],
@@ -757,7 +986,7 @@ def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:
 
     assert created.status_code == 201
     assert len(api_data(created)["route_id"]) <= 64
-    assert client.get(path).json() == {
+    assert client.get(f"/default{path}").json() == {
         "code": 0,
         "message": "OK",
         "data": {"ok": True},
@@ -783,7 +1012,7 @@ def test_new_app_instance_recovers_real_generated_handler(tmp_path: Path) -> Non
 
     restarted_client = TestClient(create_test_app(settings=settings, generator=None))
 
-    assert restarted_client.get("/hello").json() == {
+    assert restarted_client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "restored"},
@@ -1037,15 +1266,16 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     )
     assert create_response.status_code == 201
 
+    route_id = api_data(create_response)["route_id"]
     updated = client.put(
-        "/api/v1/manage/routes/get-hello",
+        f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
         json={"instruction": "Greet the name query parameter", "expected_version": 1},
     )
 
     assert updated.status_code == 200
     assert api_data(updated)["version"] == 2
-    assert client.get("/hello?name=Tom").json() == {
+    assert client.get("/default/hello?name=Tom").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello Tom"},
@@ -1053,7 +1283,7 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     assert generator.calls[1]["current_source"] == first.source
 
     stale = client.put(
-        "/api/v1/manage/routes/get-hello",
+        f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
         json={"instruction": "Another change", "expected_version": 1},
     )
@@ -1078,7 +1308,7 @@ def test_post_business_route_receives_json_body(tmp_path: Path) -> None:
         json={"path": "/echo", "method": "POST", "instruction": "Echo JSON body"},
     )
 
-    response = client.post("/echo", json={"name": "Tom"})
+    response = client.post("/default/echo", json={"name": "Tom"})
 
     assert created.status_code == 201
     assert response.status_code == 200
@@ -1113,7 +1343,7 @@ def test_post_business_route_defaults_to_json_body_without_content_type(
         == 201
     )
 
-    response = client.post("/echo", content='{"name":"Tom"}')
+    response = client.post("/default/echo", content='{"name":"Tom"}')
 
     assert response.status_code == 200
     assert response.json() == {
@@ -1166,7 +1396,7 @@ def test_json_suffix_media_type_is_parsed_as_json(tmp_path: Path) -> None:
     )
 
     response = client.patch(
-        "/patch",
+        "/default/patch",
         content='{"name":"Tom"}',
         headers={"Content-Type": "application/merge-patch+json"},
     )
@@ -1215,7 +1445,7 @@ def test_sensitive_headers_are_not_exposed_to_generated_handler(tmp_path: Path) 
     )
 
     response = client.get(
-        "/headers",
+        "/default/headers",
         headers={
             "Authorization": f"Bearer {SENSITIVE_AUTH_TOKEN}",
             "Cookie": f"session={SENSITIVE_COOKIE}",
@@ -1268,14 +1498,15 @@ def test_invalid_generated_update_keeps_old_handler(tmp_path: Path) -> None:
         == 201
     )
 
+    route_id = RouteRuntime.route_id_for("/default/hello", "GET")
     rejected = client.put(
-        "/api/v1/manage/routes/get-hello",
+        f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
         json={"instruction": "unsafe", "expected_version": 1},
     )
 
     assert rejected.status_code == 422
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "old"},
@@ -1305,7 +1536,9 @@ def test_create_conflict_and_route_listing(tmp_path: Path) -> None:
     assert duplicate.status_code == 409
     assert len(generator.calls) == 1
     assert routes.status_code == 200
-    assert [route["route_id"] for route in api_data(routes)] == ["get-hello"]
+    assert [route["route_id"] for route in api_data(routes)] == [
+        RouteRuntime.route_id_for("/default/hello", "GET")
+    ]
 
 
 def test_management_rejects_reserved_path_and_unsupported_method(

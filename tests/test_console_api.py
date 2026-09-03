@@ -261,6 +261,8 @@ def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),
     [
+        ("GET", "/api/v1/manage/operations", None),
+        ("GET", "/api/v1/manage/operations/missing", None),
         ("GET", "/api/v1/manage/requirements", None),
         (
             "POST",
@@ -382,9 +384,10 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
 
     assert implemented.status_code == 200
     assert api_data(implemented)["status"] == "finish"
-    assert api_data(implemented)["route_id"] == "get-hello"
+    default_route_id = RouteRuntime.route_id_for("/default/hello", "GET")
+    assert api_data(implemented)["route_id"] == default_route_id
     assert api_data(implemented)["route_version"] == 1
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello-v1"},
@@ -393,7 +396,7 @@ def test_new_requirement_persists_and_implementation_hot_loads_version_one(
     reopened_store = RequirementStore(settings.metadata_db_path)
     persisted_active = reopened_store.get(requirement_id)
     assert persisted_active.status == "active"
-    assert persisted_active.route_id == "get-hello"
+    assert persisted_active.route_id == default_route_id
     assert persisted_active.route_version == 1
     assert [event.to_status for event in reopened_store.list_events(requirement_id)] == [
         "draft",
@@ -435,12 +438,14 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
 
     assert edited.status_code == 200
     assert api_data(edited)["status"] == "draft"
-    assert api_data(edited)["route_id"] == "get-hello"
+    assert api_data(edited)["route_id"] == RouteRuntime.route_id_for(
+        "/default/hello", "GET"
+    )
     assert api_data(edited)["route_version"] == 1
     assert second_implementation.status_code == 200
     assert api_data(second_implementation)["status"] == "finish"
     assert api_data(second_implementation)["route_version"] == 2
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello-v2"},
@@ -613,7 +618,7 @@ def test_transient_completion_conflict_is_retried_without_regenerating(
     assert api_data(implemented)["route_version"] == 1
     assert store.complete_attempts == 2
     assert len(generator.calls) == 1
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello"},
@@ -653,7 +658,7 @@ def test_published_receipt_is_reconciled_without_regenerating(
 
     assert interrupted.status_code == 409
     assert store.get(requirement_id).status == "implementing"
-    assert client.get("/hello").json() == {
+    assert client.get("/default/hello").json() == {
         "code": 0,
         "message": "OK",
         "data": {"message": "hello"},
@@ -724,7 +729,7 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
                 headers=management_headers(),
             )
             requirement = api_data(requirement_response)[0]
-            business = await client.get("/hello")
+            business = await client.get("/default/hello")
             return requirement, business
 
     requirement, business = asyncio.run(run_scenario())

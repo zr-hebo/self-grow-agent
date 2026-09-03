@@ -14,6 +14,8 @@ from typing import Literal
 from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 
 RequirementStatus = Literal["draft", "implementing", "active", "failed"]
+OperationKind = Literal["create", "update", "move"]
+OperationStatus = Literal["accepted", "implementing", "finish", "failed"]
 INTERRUPTED_MESSAGE = "interrupted"
 _REQUIREMENT_COLUMNS = {
     "project": "TEXT NOT NULL DEFAULT 'default'",
@@ -29,6 +31,10 @@ class RequirementStoreError(Exception):
 
 class RequirementNotFoundError(RequirementStoreError, LookupError):
     """The requested requirement does not exist."""
+
+
+class OperationNotFoundError(RequirementStoreError, LookupError):
+    """The requested implementation operation does not exist."""
 
 
 class RequirementBusyError(RequirementStoreError):
@@ -67,6 +73,28 @@ class RequirementEvent:
     to_status: RequirementStatus
     message: str | None
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRecord:
+    """One immutable snapshot of an asynchronous implementation attempt."""
+
+    id: str
+    requirement_id: str
+    kind: OperationKind
+    instruction: str
+    path: str
+    method: str
+    project: str
+    base_route_id: str | None
+    base_route_version: int | None
+    target_route_id: str | None
+    target_route_version: int | None
+    target_source_sha256: str | None
+    status: OperationStatus
+    last_error: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 def _now() -> datetime:
@@ -109,6 +137,12 @@ def _validate_source_sha256(value: str) -> str:
     ):
         raise ValueError("source_sha256 must be a lowercase SHA-256 digest")
     return value
+
+
+def _validate_operation_kind(value: str) -> OperationKind:
+    if value not in {"create", "update", "move"}:
+        raise ValueError("operation kind is invalid")
+    return value  # type: ignore[return-value]
 
 
 class RequirementStore:
@@ -222,6 +256,51 @@ class RequirementStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operations (
+                    id TEXT PRIMARY KEY,
+                    requirement_id TEXT NOT NULL REFERENCES requirements(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL CHECK (kind IN ('create', 'update', 'move')),
+                    instruction TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    base_route_id TEXT,
+                    base_route_version INTEGER,
+                    target_route_id TEXT,
+                    target_route_version INTEGER,
+                    target_source_sha256 TEXT,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('accepted', 'implementing', 'finish', 'failed')
+                    ),
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (
+                        (base_route_id IS NULL AND base_route_version IS NULL)
+                        OR (
+                            base_route_id IS NOT NULL
+                            AND base_route_version IS NOT NULL
+                            AND base_route_version >= 1
+                        )
+                    ),
+                    CHECK (
+                        (
+                            target_route_id IS NULL
+                            AND target_route_version IS NULL
+                            AND target_source_sha256 IS NULL
+                        )
+                        OR (
+                            target_route_id IS NOT NULL
+                            AND target_route_version IS NOT NULL
+                            AND target_route_version >= 1
+                            AND target_source_sha256 IS NOT NULL
+                        )
+                    )
+                )
+                """
+            )
             self._ensure_requirement_columns(connection)
             connection.execute(
                 """
@@ -239,6 +318,19 @@ class RequirementStore:
                 """
                 CREATE INDEX IF NOT EXISTS events_requirement_id_idx
                 ON events(requirement_id, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS operations_requirement_created_at_idx
+                ON operations(requirement_id, created_at DESC, id DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS operations_one_active_requirement_idx
+                ON operations(requirement_id)
+                WHERE status IN ('accepted', 'implementing')
                 """
             )
             connection.commit()
@@ -304,6 +396,43 @@ class RequirementStore:
                         message=INTERRUPTED_MESSAGE,
                         timestamp=timestamp,
                     )
+            operation_rows = connection.execute(
+                "SELECT * FROM operations WHERE status IN (?, ?)",
+                ("accepted", "implementing"),
+            ).fetchall()
+            for row in operation_rows:
+                publication = active_publications.get(row["target_route_id"])
+                published = (
+                    row["status"] == "implementing"
+                    and row["target_route_id"] is not None
+                    and publication
+                    == (row["target_route_version"], row["target_source_sha256"])
+                )
+                if published:
+                    connection.execute(
+                        """
+                        UPDATE operations
+                        SET status = ?, last_error = NULL, updated_at = ?
+                        WHERE id = ? AND status = ?
+                        """,
+                        ("finish", timestamp, row["id"], "implementing"),
+                    )
+                else:
+                    connection.execute(
+                        """
+                        UPDATE operations
+                        SET status = ?, last_error = ?, updated_at = ?
+                        WHERE id = ? AND status IN (?, ?)
+                        """,
+                        (
+                            "failed",
+                            INTERRUPTED_MESSAGE,
+                            timestamp,
+                            row["id"],
+                            "accepted",
+                            "implementing",
+                        ),
+                    )
             connection.commit()
 
     def create(
@@ -362,6 +491,306 @@ class RequirementStore:
             )
             connection.commit()
         return self.get(requirement_id)
+
+    def create_operation(
+        self,
+        requirement_id: str,
+        *,
+        kind: str,
+        instruction: str,
+        path: str,
+        method: str,
+        project: str,
+        base_route_id: str | None = None,
+        base_route_version: int | None = None,
+    ) -> OperationRecord:
+        """Persist an accepted execution snapshot for one requirement."""
+
+        requirement_id = _validate_text("requirement_id", requirement_id)
+        validated_kind = _validate_operation_kind(kind)
+        instruction = _validate_text("instruction", instruction)
+        path = _validate_text("path", path)
+        method = _validate_text("method", method)
+        project = normalize_project(project)
+        base_route_id, base_route_version = _validate_route_link(
+            base_route_id,
+            base_route_version,
+        )
+        operation_id = uuid.uuid4().hex
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_row(connection, requirement_id)
+            self._ensure_no_active_operation(connection, requirement_id)
+            self._insert_operation(
+                connection,
+                operation_id=operation_id,
+                requirement_id=requirement_id,
+                kind=validated_kind,
+                instruction=instruction,
+                path=path,
+                method=method,
+                project=project,
+                base_route_id=base_route_id,
+                base_route_version=base_route_version,
+                timestamp=timestamp,
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
+
+    def revise_and_create_operation(
+        self,
+        requirement_id: str,
+        *,
+        title: str,
+        instruction: str,
+        kind: str,
+        base_route_id: str | None = None,
+        base_route_version: int | None = None,
+    ) -> OperationRecord:
+        """Atomically revise a requirement and snapshot its next execution."""
+
+        requirement_id = _validate_text("requirement_id", requirement_id)
+        title = _validate_text("title", title)
+        instruction = _validate_text("instruction", instruction)
+        validated_kind = _validate_operation_kind(kind)
+        base_route_id, base_route_version = _validate_route_link(
+            base_route_id,
+            base_route_version,
+        )
+        operation_id = uuid.uuid4().hex
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = self._require_row(connection, requirement_id)
+            if current["status"] == "implementing":
+                raise RequirementBusyError(
+                    f"requirement {requirement_id!r} is being implemented"
+                )
+            self._ensure_no_active_operation(connection, requirement_id)
+            from_status: RequirementStatus = current["status"]
+            connection.execute(
+                """
+                UPDATE requirements
+                SET title = ?, instruction = ?, route_id = ?, route_version = ?,
+                    status = ?, last_error = NULL, target_route_id = NULL,
+                    target_route_version = NULL, target_source_sha256 = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    title,
+                    instruction,
+                    base_route_id,
+                    base_route_version,
+                    "draft",
+                    timestamp,
+                    requirement_id,
+                ),
+            )
+            if from_status != "draft":
+                self._append_event(
+                    connection,
+                    requirement_id=requirement_id,
+                    from_status=from_status,
+                    to_status="draft",
+                    message="content updated",
+                    timestamp=timestamp,
+                )
+            self._insert_operation(
+                connection,
+                operation_id=operation_id,
+                requirement_id=requirement_id,
+                kind=validated_kind,
+                instruction=instruction,
+                path=current["path"],
+                method=current["method"],
+                project=current["project"],
+                base_route_id=base_route_id,
+                base_route_version=base_route_version,
+                timestamp=timestamp,
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
+
+    def get_operation(self, operation_id: str) -> OperationRecord:
+        operation_id = _validate_text("operation_id", operation_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE id = ?",
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            raise OperationNotFoundError(f"operation {operation_id!r} was not found")
+        return self._operation_from_row(row)
+
+    def list_operations(
+        self,
+        requirement_id: str | None = None,
+    ) -> tuple[OperationRecord, ...]:
+        if requirement_id is not None:
+            requirement_id = _validate_text("requirement_id", requirement_id)
+        with self._connection() as connection:
+            if requirement_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM operations ORDER BY created_at DESC, id DESC"
+                ).fetchall()
+            else:
+                self._require_row(connection, requirement_id)
+                rows = connection.execute(
+                    "SELECT * FROM operations WHERE requirement_id = ? "
+                    "ORDER BY created_at DESC, id DESC",
+                    (requirement_id,),
+                ).fetchall()
+        return tuple(self._operation_from_row(row) for row in rows)
+
+    def begin_operation(self, operation_id: str) -> OperationRecord:
+        """Atomically claim an accepted operation and its requirement."""
+
+        operation_id = _validate_text("operation_id", operation_id)
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = self._require_operation_row(connection, operation_id)
+            if operation["status"] != "accepted":
+                raise RequirementBusyError(
+                    f"operation {operation_id!r} cannot begin from status "
+                    f"{operation['status']!r}"
+                )
+            requirement = self._require_row(connection, operation["requirement_id"])
+            from_status: RequirementStatus = requirement["status"]
+            if from_status not in {"draft", "failed"}:
+                raise RequirementBusyError(
+                    f"requirement {operation['requirement_id']!r} cannot begin "
+                    f"from status {from_status!r}"
+                )
+            connection.execute(
+                "UPDATE operations SET status = ?, updated_at = ? "
+                "WHERE id = ? AND status = ?",
+                ("implementing", timestamp, operation_id, "accepted"),
+            )
+            connection.execute(
+                """
+                UPDATE requirements
+                SET status = ?, last_error = NULL, target_route_id = NULL,
+                    target_route_version = NULL, target_source_sha256 = NULL,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                ("implementing", timestamp, operation["requirement_id"]),
+            )
+            self._append_event(
+                connection,
+                requirement_id=operation["requirement_id"],
+                from_status=from_status,
+                to_status="implementing",
+                message="implementation started",
+                timestamp=timestamp,
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
+
+    def prepare_operation_publication(
+        self,
+        operation_id: str,
+        *,
+        route_id: str,
+        route_version: int,
+        source_sha256: str,
+    ) -> OperationRecord:
+        operation_id = _validate_text("operation_id", operation_id)
+        route_id, route_version = _validate_route_link(route_id, route_version)
+        assert route_id is not None and route_version is not None
+        source_sha256 = _validate_source_sha256(source_sha256)
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = self._require_operation_row(connection, operation_id)
+            if operation["status"] != "implementing":
+                raise RequirementBusyError(
+                    f"operation {operation_id!r} is not implementing"
+                )
+            connection.execute(
+                """
+                UPDATE operations
+                SET target_route_id = ?, target_route_version = ?,
+                    target_source_sha256 = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    route_id,
+                    route_version,
+                    source_sha256,
+                    timestamp,
+                    operation_id,
+                    "implementing",
+                ),
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
+
+    def complete_operation(
+        self,
+        operation_id: str,
+        *,
+        route_id: str,
+        route_version: int,
+    ) -> OperationRecord:
+        operation_id = _validate_text("operation_id", operation_id)
+        route_id, route_version = _validate_route_link(route_id, route_version)
+        assert route_id is not None and route_version is not None
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = self._require_operation_row(connection, operation_id)
+            if operation["status"] == "finish":
+                connection.commit()
+                return self._operation_from_row(operation)
+            if operation["status"] != "implementing":
+                raise RequirementBusyError(
+                    f"operation {operation_id!r} is not implementing"
+                )
+            connection.execute(
+                """
+                UPDATE operations
+                SET status = ?, target_route_id = ?, target_route_version = ?,
+                    last_error = NULL, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    "finish",
+                    route_id,
+                    route_version,
+                    timestamp,
+                    operation_id,
+                    "implementing",
+                ),
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
+
+    def fail_operation(self, operation_id: str, error: str) -> OperationRecord:
+        operation_id = _validate_text("operation_id", operation_id)
+        error = _validate_text("error", error)
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            operation = self._require_operation_row(connection, operation_id)
+            if operation["status"] not in {"accepted", "implementing"}:
+                raise RequirementBusyError(
+                    f"operation {operation_id!r} cannot fail from status "
+                    f"{operation['status']!r}"
+                )
+            connection.execute(
+                """
+                UPDATE operations
+                SET status = ?, last_error = ?, updated_at = ?
+                WHERE id = ? AND status IN (?, ?)
+                """,
+                ("failed", error, timestamp, operation_id, "accepted", "implementing"),
+            )
+            connection.commit()
+        return self.get_operation(operation_id)
     def list(self, project: str | None = None) -> tuple[RequirementRecord, ...]:
         """Return requirements with the most recently updated first."""
 
@@ -897,6 +1326,74 @@ class RequirementStore:
             )
 
     @staticmethod
+    def _ensure_no_active_operation(
+        connection: sqlite3.Connection,
+        requirement_id: str,
+    ) -> None:
+        active = connection.execute(
+            "SELECT id FROM operations WHERE requirement_id = ? "
+            "AND status IN (?, ?) LIMIT 1",
+            (requirement_id, "accepted", "implementing"),
+        ).fetchone()
+        if active is not None:
+            raise RequirementBusyError(
+                f"requirement {requirement_id!r} already has an active operation"
+            )
+
+    @staticmethod
+    def _insert_operation(
+        connection: sqlite3.Connection,
+        *,
+        operation_id: str,
+        requirement_id: str,
+        kind: OperationKind,
+        instruction: str,
+        path: str,
+        method: str,
+        project: str,
+        base_route_id: str | None,
+        base_route_version: int | None,
+        timestamp: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO operations (
+                id, requirement_id, kind, instruction, path, method, project,
+                base_route_id, base_route_version, status, last_error,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                operation_id,
+                requirement_id,
+                kind,
+                instruction,
+                path,
+                method,
+                project,
+                base_route_id,
+                base_route_version,
+                "accepted",
+                None,
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    @staticmethod
+    def _require_operation_row(
+        connection: sqlite3.Connection,
+        operation_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM operations WHERE id = ?",
+            (operation_id,),
+        ).fetchone()
+        if row is None:
+            raise OperationNotFoundError(f"operation {operation_id!r} was not found")
+        return row
+
+    @staticmethod
     def _append_event(
         connection: sqlite3.Connection,
         *,
@@ -941,4 +1438,25 @@ class RequirementStore:
             to_status=row["to_status"],
             message=row["message"],
             created_at=_parse_time(row["created_at"]),
+        )
+
+    @staticmethod
+    def _operation_from_row(row: sqlite3.Row) -> OperationRecord:
+        return OperationRecord(
+            id=row["id"],
+            requirement_id=row["requirement_id"],
+            kind=row["kind"],
+            instruction=row["instruction"],
+            path=row["path"],
+            method=row["method"],
+            project=row["project"],
+            base_route_id=row["base_route_id"],
+            base_route_version=row["base_route_version"],
+            target_route_id=row["target_route_id"],
+            target_route_version=row["target_route_version"],
+            target_source_sha256=row["target_source_sha256"],
+            status=row["status"],
+            last_error=row["last_error"],
+            created_at=_parse_time(row["created_at"]),
+            updated_at=_parse_time(row["updated_at"]),
         )
