@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import secrets
 import threading
 from collections.abc import Iterator
@@ -307,6 +308,7 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
 
 def test_create_route_returns_an_accepted_task_before_generation_finishes(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     generator = AsyncBlockingFeatureGenerator(
         GeneratedHandler(source='def handle(request):\n    return {"message": "hello"}\n')
@@ -316,6 +318,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
         generator=generator,
         handler_executor=InlineHandlerExecutor(),
     )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
 
     async def run_scenario() -> tuple[httpx.Response, httpx.Response]:
         transport = httpx.ASGITransport(app=app)
@@ -364,6 +367,13 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
     }
     assert api_data(completed)["status"] == "active"
     assert api_data(completed)["route_id"] == "get-hello"
+
+    task_logs = "\n".join(record.getMessage() for record in caplog.records)
+    operation_id = api_data(completed)["id"]
+    assert f"route_task accepted operation_id={operation_id}" in task_logs
+    assert f"route_task generation_started operation_id={operation_id}" in task_logs
+    assert f"route_task generation_completed operation_id={operation_id}" in task_logs
+    assert "Return hello" not in task_logs
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:

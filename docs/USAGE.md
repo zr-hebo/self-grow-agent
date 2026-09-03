@@ -154,7 +154,7 @@ export LLM_TIMEOUT_SECONDS='30'
 
 这些变量会在导入 `main.py` 时读取为当前进程的配置快照。修改 LLM、监听地址或运行限制后，需要重启 Agent；通过管理 API 发布动态处理器则不需要重启。
 
-服务启动后会在运行日志中记录管理密钥是否已配置，以及不可逆 SHA-256 指纹和末四位掩码，便于核对客户端与服务端是否使用同一密钥。日志绝不会输出完整 `MANAGEMENT_API_KEY`、LLM API Key 或其他凭据。
+服务启动后会在运行日志中记录管理密钥是否已配置，以及不可逆 SHA-256 指纹和末四位掩码，便于核对客户端与服务端是否使用同一密钥。异步路由任务还会输出 `route_task` 阶段日志：`accepted`、`generation_started`、`generation_completed`、`completed`，失败时会记录安全错误摘要和耗时。使用 `uv run python main.py` 启动时，这些日志显示在当前终端；若通过 systemd、Docker 或其他进程管理器启动，请查看该管理器采集的标准输出。日志绝不会输出完整 `MANAGEMENT_API_KEY`、LLM API Key、LLM 原始推理、提示词或生成源码。
 
 ## 使用 Pi Coding Agent 后端
 

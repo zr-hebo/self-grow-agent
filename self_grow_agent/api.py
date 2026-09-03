@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Generic, TypeVar
@@ -93,6 +95,7 @@ _REQUIREMENT_FINALIZE_ATTEMPTS = 3
 _BUSINESS_SUCCESS_RESPONSE = {"code": 0, "message": "OK"}
 _BEIJING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 ResponseData = TypeVar("ResponseData")
+_logger = logging.getLogger("uvicorn.error")
 
 
 def _required_text(value: str) -> str:
@@ -695,6 +698,13 @@ def create_app(
             normalized_method,
             project=payload.project,
         )
+        _logger.info(
+            "route_task accepted operation_id=%s project=%s method=%s path=%s",
+            requirement.id,
+            requirement.project,
+            requirement.method,
+            requirement.path,
+        )
         task = asyncio.create_task(run_requirement_implementation(requirement.id))
         task.add_done_callback(consume_implementation_result)
         return _api_success(
@@ -899,9 +909,18 @@ def create_app(
     async def run_requirement_implementation(
         requirement_id: str,
     ) -> RequirementRecord:
+        started_at = time.monotonic()
         requirement = await asyncio.to_thread(
             active_requirement_store.begin_implementation,
             requirement_id,
+        )
+        _logger.info(
+            "route_task generation_started operation_id=%s project=%s method=%s path=%s mode=%s",
+            requirement.id,
+            requirement.project,
+            requirement.method,
+            requirement.path,
+            "update" if requirement.route_id is not None else "create",
         )
 
         async def prepare_publication(
@@ -915,6 +934,12 @@ def create_app(
                 route_id=route_id,
                 route_version=route_version,
                 source_sha256=_source_sha256(source),
+            )
+            _logger.info(
+                "route_task generation_completed operation_id=%s route_id=%s version=%s; validating and publishing",
+                requirement_id,
+                route_id,
+                route_version,
             )
 
         try:
@@ -938,12 +963,37 @@ def create_app(
                     before_publish=prepare_publication,
                 )
         except Exception as exc:
-            await fail_requirement(requirement_id, _safe_requirement_error(exc))
+            safe_error = _safe_requirement_error(exc)
+            await fail_requirement(requirement_id, safe_error)
+            _logger.warning(
+                "route_task failed operation_id=%s stage=generation_or_publication error=%s elapsed_seconds=%.3f",
+                requirement_id,
+                safe_error,
+                time.monotonic() - started_at,
+            )
             raise
         # Once the route is published, retain its receipt if SQLite finalization
         # cannot finish. Startup or a repeated implement request can then reconcile
         # the exact version and source hash without another LLM call.
-        return await finalize_requirement(requirement_id, route)
+        try:
+            completed = await finalize_requirement(requirement_id, route)
+        except Exception:
+            _logger.warning(
+                "route_task finalization_pending operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
+                requirement_id,
+                route.route_id,
+                route.version,
+                time.monotonic() - started_at,
+            )
+            raise
+        _logger.info(
+            "route_task completed operation_id=%s route_id=%s version=%s elapsed_seconds=%.3f",
+            requirement_id,
+            completed.route_id,
+            completed.route_version,
+            time.monotonic() - started_at,
+        )
+        return completed
 
     def consume_implementation_result(task: asyncio.Task[RequirementRecord]) -> None:
         if not task.cancelled():
