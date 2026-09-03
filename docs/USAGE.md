@@ -154,7 +154,7 @@ export LLM_TIMEOUT_SECONDS='30'
 
 这些变量会在导入 `main.py` 时读取为当前进程的配置快照。修改 LLM、监听地址或运行限制后，需要重启 Agent；通过管理 API 发布动态处理器则不需要重启。
 
-服务启动后会在运行日志中记录管理密钥是否已配置，以及不可逆 SHA-256 指纹和末四位掩码，便于核对客户端与服务端是否使用同一密钥。每次动态业务 API 调用会记录路由、查询参数和 JSON 请求体；异步路由任务还会输出 `route_task` 阶段日志：`accepted`、`generation_started`、`generation_completed`、`completed`，失败时会记录安全错误摘要和耗时。参数和 `accepted` 指令最长记录 1024 个字符；`password`、`token`、`api_key`、`secret`、`密码`、`口令`、`密钥` 等字段的值会替换为 `<redacted>`。使用 `uv run python main.py` 启动时，这些日志显示在当前终端；若通过 systemd、Docker 或其他进程管理器启动，请查看该管理器采集的标准输出。日志绝不会输出完整 `MANAGEMENT_API_KEY`、LLM API Key、LLM 原始推理或生成源码。
+服务启动后会在运行日志中记录管理密钥是否已配置，以及不可逆 SHA-256 指纹和末四位掩码，便于核对客户端与服务端是否使用同一密钥。每次动态业务 API 调用会记录路由、查询参数和 JSON 请求体；异步路由任务还会输出 `route_task` 阶段日志：`accepted`、`generation_started`、`generation_completed`、`completed`，失败时会记录安全错误摘要和耗时。生成失败会区分安全类别，例如 `LLM provider authentication failed`、`LLM provider request timed out`、`LLM returned invalid generated-handler JSON`、`Pi executable was not found` 或 `Pi RPC protocol error`。参数和 `accepted` 指令最长记录 1024 个字符；`password`、`token`、`api_key`、`secret`、`密码`、`口令`、`密钥` 等字段的值会替换为 `<redacted>`。使用 `uv run python main.py` 启动时，这些日志显示在当前终端；若通过 systemd、Docker 或其他进程管理器启动，请查看该管理器采集的标准输出。日志绝不会输出完整 `MANAGEMENT_API_KEY`、LLM API Key、LLM 原始推理或生成源码。
 
 ## 使用 Pi Coding Agent 后端
 
@@ -493,7 +493,7 @@ LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和�
 | `429` | `dynamic handler capacity is full` | 同时运行的处理器达到 `MAX_CONCURRENT_HANDLERS`，且等待超过 `HANDLER_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `429` | `generation capacity is full` | Pi 进程达到 `PI_MAX_CONCURRENT_RUNS`，且等待超过 `PI_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `500` | `dynamic handler failed: generated handler raised ZeroDivisionError` 等安全摘要 | 处理器运行失败或返回值不符合 JSON 契约；会返回异常类别但不包含请求值、源码或堆栈。对于数据库、网络和子进程等受限能力，请实现受控后端能力，而不是放进动态处理器。 |
-| `502` | `LLM generation failed` | LLM 请求、严格结构化输出解析或上游服务失败；检查 API Key、Base URL、模型及 LLM 服务日志。 |
+| `502` | `LLM provider authentication failed`、`LLM provider request timed out`、`LLM returned invalid generated-handler JSON` 等 | 生成失败会返回不含密钥或上游正文的安全分类；据此检查 API Key、Base URL、模型、网络或模型的结构化输出能力。 |
 | `503` | `LLM is not configured` | `LLM_API_KEY` 为空，或者 `.env` 没有被导入当前 shell。 |
 | `503` | `route publication failed` | `GENERATED_DIR` 无法写入或持久化失败；检查目录权限和磁盘状态。 |
 | `504` | `dynamic handler timed out` | 处理器执行超过 `HANDLER_TIMEOUT_SECONDS`；简化生成逻辑或调整限制。 |

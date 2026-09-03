@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from config import Settings
 from self_grow_agent.api import create_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
+from self_grow_agent.llm import GenerationError
 from self_grow_agent.metadata import RequirementBusyError, RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.runtime import RouteRuntime
@@ -764,6 +765,26 @@ def test_llm_failure_persists_only_a_safe_requirement_error(tmp_path: Path) -> N
     assert events[-1].message == "LLM generation failed"
     assert provider_detail not in failed.last_error
     assert all(event.message is None or provider_detail not in event.message for event in events)
+
+
+def test_llm_failure_persists_a_safe_diagnostic_category(tmp_path: Path) -> None:
+    generator = FakeFeatureGenerator(
+        GenerationError("LLM returned invalid generated-handler JSON")
+    )
+    client, settings = build_client(tmp_path, generator)
+    created = create_requirement(client)
+    requirement_id = api_data(created)["id"]
+
+    response = client.post(
+        f"/api/v1/manage/requirements/{requirement_id}/implement",
+        headers=management_headers(),
+    )
+
+    assert response.status_code == 502
+    assert_api_error(response, "LLM returned invalid generated-handler JSON")
+    failed = RequirementStore(settings.metadata_db_path).get(requirement_id)
+    assert failed.status == "failed"
+    assert failed.last_error == "LLM returned invalid generated-handler JSON"
 
 
 @pytest.mark.parametrize("reserved_path", ["/console", "/console/assets/override"])

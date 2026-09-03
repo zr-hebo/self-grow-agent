@@ -12,7 +12,16 @@ from self_grow_agent.llm import (
     parse_generated_handler,
 )
 from self_grow_agent.models import FeatureGenerator, GeneratedHandler
-from self_grow_agent.pi_rpc import PiRpcClient, PiRpcError
+from self_grow_agent.pi_rpc import (
+    PiRpcAgentError,
+    PiRpcClient,
+    PiRpcCommandError,
+    PiRpcError,
+    PiRpcExecutableNotFound,
+    PiRpcProcessError,
+    PiRpcProtocolError,
+    PiRpcTimeoutError,
+)
 
 _PROMPT_CONTRACT = """\
 Generate a complete Python handler for one dynamically managed HTTP API.
@@ -108,6 +117,24 @@ class PiFeatureGenerator(FeatureGenerator):
             raise
         except GenerationCapacityError:
             raise
+        except GenerationError as exc:
+            if str(exc) == "LLM returned invalid generated-handler JSON":
+                raise GenerationError("Pi returned invalid generated-handler JSON") from None
+            if str(exc) == "LLM returned an invalid generated-handler response":
+                raise GenerationError("Pi returned an invalid generated-handler response") from None
+            raise
+        except PiRpcExecutableNotFound:
+            raise GenerationError("Pi executable was not found") from None
+        except PiRpcTimeoutError:
+            raise GenerationError("Pi generation timed out") from None
+        except PiRpcProtocolError:
+            raise GenerationError("Pi RPC protocol error") from None
+        except PiRpcCommandError:
+            raise GenerationError("Pi rejected the generation request") from None
+        except PiRpcAgentError:
+            raise GenerationError("Pi agent did not complete generation") from None
+        except PiRpcProcessError:
+            raise GenerationError("Pi process failed") from None
         except PiRpcError:
             raise GenerationError("Pi generation failed") from None
         except Exception:

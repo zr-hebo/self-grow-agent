@@ -28,6 +28,39 @@ class FeatureGenerationCapacityError(AgentServiceError):
     """Raised when the generation backend has no available execution slot."""
 
 
+_SAFE_GENERATION_FAILURE_MESSAGES = frozenset(
+    {
+        "LLM provider request failed",
+        "LLM provider request timed out",
+        "LLM provider authentication failed",
+        "LLM provider rate limit exceeded",
+        "LLM provider connection failed",
+        "LLM provider returned an error",
+        "LLM returned an empty generated-handler response",
+        "LLM returned an invalid generated-handler response",
+        "LLM returned invalid generated-handler JSON",
+        "Pi executable was not found",
+        "Pi generation timed out",
+        "Pi returned invalid generated-handler JSON",
+        "Pi returned an invalid generated-handler response",
+        "Pi RPC protocol error",
+        "Pi rejected the generation request",
+        "Pi agent did not complete generation",
+        "Pi process failed",
+        "Pi generation failed",
+    }
+)
+
+
+def _safe_generation_failure_message(exc: GenerationError) -> str:
+    """Keep provider data out of a persisted generation failure message."""
+
+    message = str(exc)
+    if message in _SAFE_GENERATION_FAILURE_MESSAGES:
+        return message
+    return "LLM generation failed"
+
+
 class ManagedRouteNotFoundError(AgentServiceError):
     """Raised when an update targets a route that does not exist."""
 
@@ -139,7 +172,7 @@ class AgentManagementService:
         except GenerationCapacityError as exc:
             raise FeatureGenerationCapacityError("generation capacity is full") from exc
         except GenerationError as exc:
-            raise FeatureGenerationError("LLM generation failed") from exc
+            raise FeatureGenerationError(_safe_generation_failure_message(exc)) from exc
         except Exception as exc:
             self._raise_generation_error(exc)
 

@@ -21,6 +21,23 @@ class GenerationCapacityError(GenerationError):
     """The generation backend could not admit another request in time."""
 
 
+def _request_failure_message(exc: Exception) -> str:
+    """Classify an upstream failure without exposing its message or response body."""
+
+    exception_name = type(exc).__name__
+    if "Timeout" in exception_name:
+        return "LLM provider request timed out"
+    if "Authentication" in exception_name or "Permission" in exception_name:
+        return "LLM provider authentication failed"
+    if "RateLimit" in exception_name:
+        return "LLM provider rate limit exceeded"
+    if "Connection" in exception_name:
+        return "LLM provider connection failed"
+    if "Status" in exception_name or "BadRequest" in exception_name:
+        return "LLM provider returned an error"
+    return "LLM provider request failed"
+
+
 _FENCE_PATTERN = re.compile(
     r"```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
@@ -151,8 +168,8 @@ class OpenAIFeatureGenerator(FeatureGenerator):
                     }
                 },
             )
-        except Exception:
-            raise GenerationError("LLM generation request failed") from None
+        except Exception as exc:
+            raise GenerationError(_request_failure_message(exc)) from None
 
         output_text = getattr(response, "output_text", None)
         if not isinstance(output_text, str) or not output_text.strip():

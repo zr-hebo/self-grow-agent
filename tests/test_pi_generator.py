@@ -139,7 +139,10 @@ def test_generate_wraps_invalid_json_without_exposing_output() -> None:
         max_concurrent_runs=1,
     )
 
-    with pytest.raises(GenerationError, match="Pi generation failed") as exc_info:
+    with pytest.raises(
+        GenerationError,
+        match="Pi returned invalid generated-handler JSON",
+    ) as exc_info:
         asyncio.run(
             generator.generate(instruction="Say hello", path="/hello", method="GET")
         )

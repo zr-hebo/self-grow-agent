@@ -452,7 +452,7 @@ def _safe_requirement_error(exc: Exception) -> str:
     if isinstance(exc, LLMUnavailableError):
         return "LLM is not configured"
     if isinstance(exc, FeatureGenerationError):
-        return "LLM generation failed"
+        return str(exc)
     if isinstance(exc, FeatureGenerationCapacityError):
         return "generation capacity is full"
     if isinstance(exc, RoutePersistenceError):
@@ -629,10 +629,13 @@ def create_app(
 
     @app.exception_handler(FeatureGenerationError)
     async def generation_error_handler(request: Request, exc: Exception) -> JSONResponse:
-        del request, exc
+        del request
         return JSONResponse(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            content=_api_error(status.HTTP_502_BAD_GATEWAY, "LLM generation failed"),
+            content=_api_error(
+                status.HTTP_502_BAD_GATEWAY,
+                _safe_requirement_error(exc),
+            ),
         )
 
     @app.exception_handler(FeatureGenerationCapacityError)

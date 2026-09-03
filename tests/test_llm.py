@@ -137,3 +137,4 @@ def test_generator_wraps_provider_failures() -> None:
         )
 
     assert "secret provider details" not in str(exc_info.value)
+    assert str(exc_info.value) == "LLM provider request failed"
