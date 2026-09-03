@@ -722,6 +722,67 @@ class RequirementStore:
             connection.commit()
         return self.get(requirement_id)
 
+    def ensure_route_can_move(self, route_id: str) -> None:
+        """Reject a route move while one of its linked requirements is active."""
+
+        route_id = _validate_text("route_id", route_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT id FROM requirements WHERE route_id = ? AND status = ? LIMIT 1",
+                (route_id, "implementing"),
+            ).fetchone()
+        if row is not None:
+            raise RequirementBusyError(
+                f"route {route_id!r} has a requirement being implemented"
+            )
+
+    def move_route_links(
+        self,
+        previous_route_id: str,
+        *,
+        route_id: str,
+        route_version: int,
+        path: str,
+        project: str,
+    ) -> None:
+        """Move all inactive linked requirements to a route's new identity."""
+
+        previous_route_id = _validate_text("previous_route_id", previous_route_id)
+        route_id, route_version = _validate_route_link(route_id, route_version)
+        assert route_id is not None
+        assert route_version is not None
+        path = _validate_text("path", path)
+        project = normalize_project(project)
+        timestamp = _serialize_time(_now())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            busy = connection.execute(
+                "SELECT id FROM requirements WHERE route_id = ? AND status = ? LIMIT 1",
+                (previous_route_id, "implementing"),
+            ).fetchone()
+            if busy is not None:
+                raise RequirementBusyError(
+                    f"route {previous_route_id!r} has a requirement being implemented"
+                )
+            connection.execute(
+                """
+                UPDATE requirements
+                SET route_id = ?, route_version = ?, path = ?, project = ?,
+                    target_route_id = NULL, target_route_version = NULL,
+                    target_source_sha256 = NULL, updated_at = ?
+                WHERE route_id = ?
+                """,
+                (
+                    route_id,
+                    route_version,
+                    path,
+                    project,
+                    timestamp,
+                    previous_route_id,
+                ),
+            )
+            connection.commit()
+
     def list_events(self, requirement_id: str) -> tuple[RequirementEvent, ...]:
         """Return all status events for a requirement in append order."""
 

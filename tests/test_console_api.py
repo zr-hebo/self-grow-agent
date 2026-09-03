@@ -256,7 +256,7 @@ def test_console_requirement_keeps_project_when_implementing(tmp_path: Path) -> 
         "/api/v1/manage/routes?project=store",
         headers=management_headers(),
     )
-    assert [route["path"] for route in api_data(routes)] == ["/orders"]
+    assert [route["path"] for route in api_data(routes)] == ["/store/orders"]
 
 @pytest.mark.parametrize(
     ("method", "path", "payload"),

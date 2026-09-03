@@ -312,3 +312,28 @@ def test_missing_requirement_raises_not_found(store: RequirementStore) -> None:
         store.get("missing")
     with pytest.raises(RequirementNotFoundError):
         store.list_events("missing")
+
+
+def test_moving_route_links_updates_inactive_requirements(store: RequirementStore) -> None:
+    requirement = store.create(
+        "Rebuild replication",
+        "Return a plan",
+        "/rebuild_replication",
+        "POST",
+        route_id="post-rebuild_replication",
+        route_version=1,
+    )
+
+    store.move_route_links(
+        "post-rebuild_replication",
+        route_id="post-h-binlog-server-rebuild",
+        route_version=2,
+        path="/binlog-server/rebuild_replication",
+        project="binlog-server",
+    )
+
+    moved = store.get(requirement.id)
+    assert moved.route_id == "post-h-binlog-server-rebuild"
+    assert moved.route_version == 2
+    assert moved.path == "/binlog-server/rebuild_replication"
+    assert moved.project == "binlog-server"

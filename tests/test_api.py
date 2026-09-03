@@ -558,14 +558,107 @@ def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
     assert [route["project"] for route in api_data(routes)] == ["billing", "store"]
     assert api_data(filtered) == [
         {
-            "route_id": "get-orders",
-            "path": "/orders",
+            "route_id": "get-store-orders",
+            "path": "/store/orders",
             "method": "GET",
             "project": "store",
             "version": 1,
             "description": "",
         }
     ]
+
+
+def test_all_projects_publish_below_their_project_prefix(tmp_path: Path) -> None:
+    generator = FakeFeatureGenerator(
+        GeneratedHandler(source='def handle(request):\n    return {"ok": True}\n'),
+        GeneratedHandler(source='def handle(request):\n    return {"ok": True}\n'),
+    )
+    client = TestClient(
+        create_test_app(settings=make_settings(tmp_path), generator=generator)
+    )
+
+    default_created = client.post(
+        "/api/v1/manage/routes",
+        headers=management_headers(),
+        json={"path": "/hello", "method": "GET", "instruction": "Return ok"},
+    )
+    project_created = client.post(
+        "/api/v1/manage/routes",
+        headers=management_headers(),
+        json={
+            "path": "/rebuild_replication",
+            "method": "POST",
+            "project": "binlog-server",
+            "instruction": "Return ok",
+        },
+    )
+
+    assert api_data(default_created)["path"] == "/default/hello"
+    assert api_data(project_created)["path"] == "/binlog-server/rebuild_replication"
+    assert client.get("/hello").status_code == 404
+    assert client.get("/default/hello").status_code == 200
+    assert client.post("/rebuild_replication").status_code == 404
+    assert client.post("/binlog-server/rebuild_replication").status_code == 200
+
+
+def test_existing_route_can_move_to_a_named_project_prefix(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    original = runtime.create(
+        "/rebuild_replication",
+        "POST",
+        'def handle(request):\n    return {"ok": True}\n',
+    )
+    app = build_app(
+        settings=settings,
+        generator=None,
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+    )
+    client = TestClient(app)
+    requirement = client.post(
+        "/api/v1/manage/requirements",
+        headers=management_headers(),
+        json={
+            "title": "Rebuild replication",
+            "instruction": "Return ok",
+            "path": "/rebuild_replication",
+            "method": "POST",
+            "route_id": original.route_id,
+        },
+    )
+
+    moved = client.post(
+        f"/api/v1/manage/routes/{original.route_id}/move",
+        headers=management_headers(),
+        json={
+            "project": "binlog-server",
+            "path": "/rebuild_replication",
+            "expected_version": 1,
+        },
+    )
+
+    assert requirement.status_code == 201
+    assert moved.status_code == 200
+    assert api_data(moved)["path"] == "/binlog-server/rebuild_replication"
+    assert api_data(moved)["project"] == "binlog-server"
+    assert api_data(moved)["version"] == 2
+    assert client.post("/rebuild_replication").status_code == 404
+    assert client.post("/binlog-server/rebuild_replication").json() == {
+        "code": 0,
+        "message": "OK",
+        "data": {"ok": True},
+    }
+    moved_requirement = api_data(
+        client.get(
+            f"/api/v1/manage/requirements/{api_data(requirement)['id']}",
+            headers=management_headers(),
+        )
+    )
+    assert moved_requirement["route_id"] == api_data(moved)["route_id"]
+    assert moved_requirement["route_version"] == 2
+    assert moved_requirement["path"] == "/binlog-server/rebuild_replication"
+    assert moved_requirement["project"] == "binlog-server"
 
 
 def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:

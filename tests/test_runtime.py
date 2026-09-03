@@ -176,6 +176,26 @@ def test_update_uses_compare_and_swap_and_increments_version(runtime: RouteRunti
         runtime.update("get-hello", "hello stale", expected_version=1)
 
 
+def test_move_replaces_the_old_path_and_increments_the_version(
+    runtime: RouteRuntime,
+) -> None:
+    original = runtime.create("/rebuild_replication", "POST", "rebuild", project="default")
+
+    moved = runtime.move(
+        original.route_id,
+        path="/binlog-server/rebuild_replication",
+        project="binlog-server",
+        expected_version=original.version,
+    )
+
+    assert moved.route_id != original.route_id
+    assert moved.path == "/binlog-server/rebuild_replication"
+    assert moved.project == "binlog-server"
+    assert moved.version == 2
+    assert runtime.resolve("POST", "/rebuild_replication") is None
+    assert runtime.resolve("POST", "/binlog-server/rebuild_replication") == moved
+
+
 def test_concurrent_updates_allow_only_one_expected_version_winner(
     runtime: RouteRuntime,
 ) -> None:

@@ -59,6 +59,7 @@ from self_grow_agent.runtime import (
     RouteRuntime,
     RouteValidationError,
     VersionConflictError,
+    normalize_path,
 )
 from self_grow_agent.service import (
     AgentManagementService,
@@ -302,6 +303,16 @@ class UpdateRouteRequest(BaseModel):
     _normalize_instruction = field_validator("instruction")(_required_text)
 
 
+class MoveRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(min_length=1, max_length=256)
+    project: str = Field(min_length=1, max_length=63)
+    expected_version: int = Field(ge=1)
+
+    _normalize_project = field_validator("project")(normalize_project)
+
+
 class CreateRequirementRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -490,6 +501,13 @@ def _route_requirement_title(project: str, method: str, path: str) -> str:
     """Return a deterministic, bounded title for a direct route request."""
 
     return f"{project}: {method} {path}"[:120]
+
+
+def _public_route_path(project: str, path: str) -> str:
+    """Map a project-relative management path to its public business path."""
+
+    normalized_path = normalize_path(path)
+    return f"/{project}{normalized_path}"
 
 
 def _active_publications(runtime: RouteRuntime) -> dict[str, tuple[int, str]]:
@@ -770,9 +788,10 @@ def create_app(
         payload: CreateRouteRequest,
         response: Response,
     ) -> dict[str, Any]:
+        public_path = _public_route_path(payload.project, payload.path)
         if not async_route_creation:
             record = await service.create_route(
-                path=payload.path,
+                path=public_path,
                 method=payload.method,
                 project=payload.project,
                 instruction=payload.instruction,
@@ -783,7 +802,7 @@ def create_app(
         if active_generator is None:
             raise LLMUnavailableError("LLM is not configured")
         normalized_path, normalized_method = active_runtime.validate_route(
-            payload.path,
+            public_path,
             payload.method,
         )
         if active_runtime.resolve(normalized_method, normalized_path) is not None:
@@ -832,6 +851,35 @@ def create_app(
         )
         return _api_success(RouteResponse.from_record(record))
 
+    @app.post(
+        "/api/v1/manage/routes/{route_id}/move",
+        response_model=ApiResponse[RouteResponse],
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def move_route(route_id: str, payload: MoveRouteRequest) -> dict[str, Any]:
+        current = active_runtime.get(route_id)
+        if current is None:
+            raise ManagedRouteNotFoundError("managed route not found")
+        public_path = _public_route_path(payload.project, payload.path)
+        active_runtime.validate_route(public_path, current.method)
+        await asyncio.to_thread(active_requirement_store.ensure_route_can_move, route_id)
+        moved = active_runtime.move(
+            route_id,
+            path=public_path,
+            project=payload.project,
+            expected_version=payload.expected_version,
+        )
+        await asyncio.to_thread(
+            active_requirement_store.move_route_links,
+            route_id,
+            route_id=moved.route_id,
+            route_version=moved.version,
+            path=moved.path,
+            project=moved.project,
+        )
+        return _api_success(RouteResponse.from_record(moved))
+
     @app.get(
         "/api/v1/manage/requirements",
         response_model=ApiResponse[list[RequirementResponse]],
@@ -857,12 +905,25 @@ def create_app(
     async def create_requirement(
         payload: CreateRequirementRequest,
     ) -> dict[str, Any]:
-        normalized_path, normalized_method = active_runtime.validate_route(
-            payload.path,
-            payload.method,
-        )
         route_id = payload.route_id
         route_version: int | None = None
+        linked_route: RouteRecord | None = None
+        if route_id is not None:
+            linked_route = active_runtime.get(route_id)
+            if linked_route is None:
+                raise ManagedRouteNotFoundError("managed route not found")
+            supplied_path = normalize_path(payload.path)
+            public_path = (
+                supplied_path
+                if supplied_path == linked_route.path
+                else _public_route_path(payload.project, supplied_path)
+            )
+        else:
+            public_path = _public_route_path(payload.project, payload.path)
+        normalized_path, normalized_method = active_runtime.validate_route(
+            public_path,
+            payload.method,
+        )
         active_route = active_runtime.resolve(normalized_method, normalized_path)
         if route_id is None:
             if active_route is not None:
@@ -871,9 +932,7 @@ def create_app(
                     "link the requirement to that route"
                 )
         else:
-            linked_route = active_runtime.get(route_id)
-            if linked_route is None:
-                raise ManagedRouteNotFoundError("managed route not found")
+            assert linked_route is not None
             if (
                 linked_route.path != normalized_path
                 or linked_route.method != normalized_method

@@ -283,6 +283,73 @@ class RouteRuntime:
             self._commit(candidate, source)
         return candidate
 
+    def move(
+        self,
+        route_id: str,
+        *,
+        path: str,
+        project: str,
+        expected_version: int,
+    ) -> RouteRecord:
+        """Atomically move a route to a new public path and project."""
+
+        route_id = self._validate_route_id(route_id)
+        normalized_path, normalized_method = self.validate_route(path, "GET")
+        project = self.normalize_project(project)
+        expected_version = self._validate_version(expected_version)
+
+        with self._lock:
+            current = self._records_by_id.get(route_id)
+            if current is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(current, expected_version)
+            normalized_method = current.method
+            normalized_path, _ = self.validate_route(normalized_path, normalized_method)
+            if current.path == normalized_path and current.project == project:
+                raise RouteValidationError("route already has the requested project and path")
+
+            target_key = (normalized_method, normalized_path)
+            target_route_id = _route_id(normalized_method, normalized_path)
+            existing = self._records.get(target_key)
+            if existing is not None and existing.route_id != current.route_id:
+                raise RouteAlreadyExistsError(
+                    f"route {existing.method} {existing.path} already exists"
+                )
+            existing_by_id = self._records_by_id.get(target_route_id)
+            if existing_by_id is not None and existing_by_id.route_id != current.route_id:
+                raise RouteAlreadyExistsError(f"route id {target_route_id!r} already exists")
+
+        candidate = self._build_record(
+            route_id=target_route_id,
+            path=normalized_path,
+            method=normalized_method,
+            project=project,
+            version=expected_version + 1,
+            source=current.source,
+            description=current.description,
+        )
+
+        with self._lock:
+            active = self._records_by_id.get(route_id)
+            if active is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(active, expected_version)
+            target_key = (candidate.method, candidate.path)
+            existing = self._records.get(target_key)
+            if existing is not None and existing.route_id != active.route_id:
+                raise RouteAlreadyExistsError(
+                    f"route {existing.method} {existing.path} already exists"
+                )
+            existing_by_id = self._records_by_id.get(candidate.route_id)
+            if existing_by_id is not None and existing_by_id.route_id != active.route_id:
+                raise RouteAlreadyExistsError(f"route id {candidate.route_id!r} already exists")
+
+            next_records = dict(self._records)
+            next_records.pop((active.method, active.path))
+            next_records[target_key] = candidate
+            self._commit_records(next_records, candidate, candidate.source)
+        return candidate
+
     def get(self, route_id: str) -> RouteRecord | None:
         """Return one active immutable record snapshot by id."""
 
@@ -382,6 +449,14 @@ class RouteRuntime:
         key = (candidate.method, candidate.path)
         next_records = dict(self._records)
         next_records[key] = candidate
+        self._commit_records(next_records, candidate, source)
+
+    def _commit_records(
+        self,
+        next_records: dict[tuple[str, str], RouteRecord],
+        candidate: RouteRecord,
+        source: str,
+    ) -> None:
         source_existed = candidate.source_file.exists()
 
         try:
