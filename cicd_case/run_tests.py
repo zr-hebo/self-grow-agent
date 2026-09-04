@@ -39,8 +39,13 @@ GROUPS = {
         "file": "test_pi_lifecycle.py",
         "cases": ("test_pi_rpc_backend_generates_and_hot_loads_handler",),
     },
+    "plugin": {
+        "label": "Full plugin lifecycle",
+        "file": "test_plugin_lifecycle.py",
+        "cases": ("test_plugin_lifecycle",),
+    },
 }
-DEFAULT_GROUPS = ("health", "lifecycle", "coding_agent")
+DEFAULT_GROUPS = ("health", "lifecycle", "coding_agent", "plugin")
 
 
 class TeeStream:

@@ -11,11 +11,11 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 MANIFEST_FILENAME = "routes.json"
 SUPPORTED_METHODS = frozenset({"GET", "POST", "PUT", "PATCH", "DELETE"})
 RESERVED_ROOTS = (
@@ -93,9 +93,12 @@ class RouteRecord:
     project: str
     version: int
     description: str
-    source_file: Path
-    source: str = field(repr=False, compare=False)
-    handler: Callable[[dict[str, Any]], Any] = field(repr=False, compare=False)
+    execution_mode: Literal["restricted", "plugin"]
+    source_file: Path | None
+    source: str | None = field(repr=False, compare=False)
+    handler: Callable[[dict[str, Any]], Any] | None = field(repr=False, compare=False)
+    artifact_path: Path | None = None
+    artifact_digest: str | None = None
 
 
 def normalize_method(method: str) -> str:
@@ -167,9 +170,15 @@ class RouteRuntime:
         self,
         generated_dir: str | Path,
         loader: HandlerLoader | None = None,
+        *,
+        plugin_artifact_root: str | Path | None = None,
     ) -> None:
         self.generated_dir = Path(generated_dir).expanduser().resolve()
         self.generated_dir.mkdir(parents=True, exist_ok=True)
+        self.plugin_artifact_root = Path(
+            plugin_artifact_root or self.generated_dir / "plugins"
+        ).expanduser().resolve()
+        self.plugin_artifact_root.mkdir(parents=True, exist_ok=True)
         self.manifest_path = self.generated_dir / MANIFEST_FILENAME
         if loader is None:
             # Keep the dependency lazy so callers can inject a policy-specific loader.
@@ -245,6 +254,40 @@ class RouteRuntime:
             self._commit(candidate, source)
         return candidate
 
+    def create_plugin(
+        self,
+        path: str,
+        method: str,
+        *,
+        artifact_path: str | Path,
+        artifact_digest: str,
+        description: str = "",
+        project: str = DEFAULT_PROJECT,
+    ) -> RouteRecord:
+        """Persist and activate a validated immutable plugin artifact."""
+
+        normalized_path, normalized_method = self.validate_route(path, method)
+        description = self._validate_description(description)
+        project = self.normalize_project(project)
+        key = (normalized_method, normalized_path)
+        route_id = _route_id(normalized_method, normalized_path)
+        with self._lock:
+            self._ensure_create_available(key, route_id)
+        candidate = self._build_plugin_record(
+            route_id=route_id,
+            path=normalized_path,
+            method=normalized_method,
+            project=project,
+            version=1,
+            description=description,
+            artifact_path=artifact_path,
+            artifact_digest=artifact_digest,
+        )
+        with self._lock:
+            self._ensure_create_available(key, route_id)
+            self._commit_plugin(candidate)
+        return candidate
+
     def update(
         self,
         route_id: str,
@@ -281,6 +324,94 @@ class RouteRuntime:
                 raise RouteNotFoundError(f"route {route_id!r} was not found")
             self._ensure_version(active, expected_version)
             self._commit(candidate, source)
+        return candidate
+
+    def update_plugin(
+        self,
+        route_id: str,
+        *,
+        artifact_path: str | Path,
+        artifact_digest: str,
+        expected_version: int,
+        description: str = "",
+    ) -> RouteRecord:
+        """Atomically activate a new immutable plugin version using CAS."""
+
+        route_id = self._validate_route_id(route_id)
+        description = self._validate_description(description)
+        expected_version = self._validate_version(expected_version)
+        with self._lock:
+            current = self._records_by_id.get(route_id)
+            if current is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(current, expected_version)
+        candidate = self._build_plugin_record(
+            route_id=current.route_id,
+            path=current.path,
+            method=current.method,
+            project=current.project,
+            version=expected_version + 1,
+            description=description,
+            artifact_path=artifact_path,
+            artifact_digest=artifact_digest,
+        )
+        with self._lock:
+            active = self._records_by_id.get(route_id)
+            if active is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(active, expected_version)
+            self._commit_plugin(candidate)
+        return candidate
+
+    def move_plugin(
+        self,
+        route_id: str,
+        *,
+        path: str,
+        project: str,
+        artifact_path: str | Path,
+        artifact_digest: str,
+        expected_version: int,
+        description: str = "",
+    ) -> RouteRecord:
+        """Atomically move a route while activating a new plugin artifact."""
+
+        route_id = self._validate_route_id(route_id)
+        project = self.normalize_project(project)
+        expected_version = self._validate_version(expected_version)
+        description = self._validate_description(description)
+        with self._lock:
+            current = self._records_by_id.get(route_id)
+            if current is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(current, expected_version)
+            normalized_path, normalized_method = self.validate_route(path, current.method)
+            target_key = (normalized_method, normalized_path)
+            target_route_id = _route_id(normalized_method, normalized_path)
+            existing = self._records.get(target_key)
+            if existing is not None and existing.route_id != current.route_id:
+                raise RouteAlreadyExistsError(
+                    f"route {existing.method} {existing.path} already exists"
+                )
+        candidate = self._build_plugin_record(
+            route_id=target_route_id,
+            path=normalized_path,
+            method=normalized_method,
+            project=project,
+            version=expected_version + 1,
+            description=description,
+            artifact_path=artifact_path,
+            artifact_digest=artifact_digest,
+        )
+        with self._lock:
+            active = self._records_by_id.get(route_id)
+            if active is None:
+                raise RouteNotFoundError(f"route {route_id!r} was not found")
+            self._ensure_version(active, expected_version)
+            next_records = dict(self._records)
+            next_records.pop((active.method, active.path))
+            next_records[(candidate.method, candidate.path)] = candidate
+            self._commit_plugin_records(next_records)
         return candidate
 
     def move(
@@ -451,9 +582,48 @@ class RouteRuntime:
             project=project,
             version=version,
             description=description,
+            execution_mode="restricted",
             source_file=source_file,
             source=source,
             handler=handler,
+        )
+
+    def _build_plugin_record(
+        self,
+        *,
+        route_id: str,
+        path: str,
+        method: str,
+        project: str,
+        version: int,
+        description: str,
+        artifact_path: str | Path,
+        artifact_digest: str,
+    ) -> RouteRecord:
+        from .plugin_runtime import verify_plugin_artifact
+
+        artifact = Path(artifact_path).expanduser().resolve()
+        if self.plugin_artifact_root not in artifact.parents:
+            raise RouteValidationError("plugin artifact path is outside the artifact root")
+        if not re.fullmatch(r"[0-9a-f]{64}", artifact_digest):
+            raise RouteValidationError("plugin artifact digest is invalid")
+        try:
+            verify_plugin_artifact(artifact, artifact_digest)
+        except ValueError as exc:
+            raise RouteValidationError(str(exc)) from None
+        return RouteRecord(
+            route_id=route_id,
+            path=path,
+            method=method,
+            project=project,
+            version=version,
+            description=description,
+            execution_mode="plugin",
+            source_file=None,
+            source=None,
+            handler=None,
+            artifact_path=artifact,
+            artifact_digest=artifact_digest,
         )
 
     def _commit(self, candidate: RouteRecord, source: str) -> None:
@@ -461,6 +631,26 @@ class RouteRuntime:
         next_records = dict(self._records)
         next_records[key] = candidate
         self._commit_records(next_records, candidate, source)
+
+    def _commit_plugin(self, candidate: RouteRecord) -> None:
+        key = (candidate.method, candidate.path)
+        next_records = dict(self._records)
+        next_records[key] = candidate
+        self._commit_plugin_records(next_records)
+
+    def _commit_plugin_records(
+        self, next_records: dict[tuple[str, str], RouteRecord]
+    ) -> None:
+        try:
+            self._write_manifest(next_records.values())
+        except RoutePersistenceError:
+            raise
+        except Exception as exc:
+            raise RoutePersistenceError("could not persist dynamic route") from exc
+        self._records = next_records
+        self._records_by_id = {
+            record.route_id: record for record in next_records.values()
+        }
 
     def _commit_records(
         self,
@@ -496,8 +686,7 @@ class RouteRuntime:
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         self._atomic_write_text(self.manifest_path, text)
 
-    @staticmethod
-    def _serialize_record(record: RouteRecord) -> dict[str, str | int]:
+    def _serialize_record(self, record: RouteRecord) -> dict[str, str | int | None]:
         return {
             "route_id": record.route_id,
             "path": record.path,
@@ -505,7 +694,14 @@ class RouteRuntime:
             "project": record.project,
             "version": record.version,
             "description": record.description,
-            "source_file": record.source_file.name,
+            "execution_mode": record.execution_mode,
+            "source_file": record.source_file.name if record.source_file else None,
+            "artifact_path": (
+                record.artifact_path.relative_to(self.plugin_artifact_root).as_posix()
+                if record.artifact_path is not None
+                else None
+            ),
+            "artifact_digest": record.artifact_digest,
         }
 
     def _atomic_write_text(self, target: Path, content: str) -> None:
@@ -535,11 +731,11 @@ class RouteRuntime:
             return
         try:
             payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-            entries = self._validate_manifest(payload)
+            schema_version, entries = self._validate_manifest(payload)
             restored: dict[tuple[str, str], RouteRecord] = {}
             restored_by_id: dict[str, RouteRecord] = {}
             for entry in entries:
-                record = self._restore_record(entry)
+                record = self._restore_record(entry, schema_version=schema_version)
                 key = (record.method, record.path)
                 if key in restored:
                     raise RoutePersistenceError(
@@ -561,17 +757,18 @@ class RouteRuntime:
             self._records_by_id = restored_by_id
 
     @staticmethod
-    def _validate_manifest(payload: object) -> list[object]:
+    def _validate_manifest(payload: object) -> tuple[int, list[object]]:
         if not isinstance(payload, dict):
             raise RoutePersistenceError("routes.json must contain an object")
-        if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        schema_version = payload.get("schema_version")
+        if schema_version not in {1, MANIFEST_SCHEMA_VERSION}:
             raise RoutePersistenceError("routes.json has an unsupported schema version")
         entries = payload.get("routes")
         if not isinstance(entries, list):
             raise RoutePersistenceError("routes.json routes must be a list")
-        return entries
+        return schema_version, entries
 
-    def _restore_record(self, entry: object) -> RouteRecord:
+    def _restore_record(self, entry: object, *, schema_version: int) -> RouteRecord:
         if not isinstance(entry, dict):
             raise RoutePersistenceError("manifest route entry must be an object")
         legacy_fields = {
@@ -582,9 +779,23 @@ class RouteRuntime:
             "description",
             "source_file",
         }
-        supported_fields = legacy_fields | {"project"}
-        if set(entry) != legacy_fields and set(entry) != supported_fields:
-            raise RoutePersistenceError("manifest route entry has invalid fields")
+        legacy_supported_fields = legacy_fields | {"project"}
+        plugin_fields = legacy_supported_fields | {
+            "execution_mode",
+            "artifact_path",
+            "artifact_digest",
+        }
+        if schema_version == 1:
+            entry_fields = set(entry)
+            if entry_fields != legacy_fields and entry_fields != legacy_supported_fields:
+                raise RoutePersistenceError("manifest route entry has invalid fields")
+            execution_mode = "restricted"
+        else:
+            if set(entry) != plugin_fields:
+                raise RoutePersistenceError("manifest route entry has invalid fields")
+            execution_mode = entry["execution_mode"]
+            if execution_mode not in {"restricted", "plugin"}:
+                raise RoutePersistenceError("manifest execution_mode is invalid")
 
         route_id = self._validate_route_id(entry["route_id"])
         path, method = self.validate_route(entry["path"], entry["method"])
@@ -594,6 +805,37 @@ class RouteRuntime:
         if route_id != _route_id(method, path):
             raise RoutePersistenceError("manifest route id does not match method and path")
 
+        if execution_mode == "plugin":
+            if entry["source_file"] is not None:
+                raise RoutePersistenceError("plugin manifest source_file must be null")
+            artifact_name = entry["artifact_path"]
+            artifact_digest = entry["artifact_digest"]
+            if (
+                not isinstance(artifact_name, str)
+                or not artifact_name
+                or Path(artifact_name).is_absolute()
+                or "\\" in artifact_name
+            ):
+                raise RoutePersistenceError("manifest plugin artifact path is invalid")
+            artifact_path = (self.plugin_artifact_root / artifact_name).resolve()
+            try:
+                return self._build_plugin_record(
+                    route_id=route_id,
+                    path=path,
+                    method=method,
+                    project=project,
+                    version=version,
+                    description=description,
+                    artifact_path=artifact_path,
+                    artifact_digest=artifact_digest,
+                )
+            except RouteValidationError as exc:
+                raise RoutePersistenceError("plugin artifact could not be restored") from exc
+
+        if schema_version == MANIFEST_SCHEMA_VERSION and (
+            entry["artifact_path"] is not None or entry["artifact_digest"] is not None
+        ):
+            raise RoutePersistenceError("restricted manifest artifact fields must be null")
         source_name = entry["source_file"]
         expected_source_name = f"{route_id}.v{version}.py"
         if not isinstance(source_name, str) or source_name != expected_source_name:
@@ -616,6 +858,7 @@ class RouteRuntime:
             project=project,
             version=version,
             description=description,
+            execution_mode="restricted",
             source_file=source_file,
             source=source,
             handler=handler,

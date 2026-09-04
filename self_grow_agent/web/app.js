@@ -23,6 +23,7 @@ const elements = {
   requirementTitle: document.querySelector("#requirement-title"),
   routeProject: document.querySelector("#route-project"),
   routeMethod: document.querySelector("#route-method"),
+  executionMode: document.querySelector("#execution-mode"),
   routePath: document.querySelector("#route-path"),
   requirementInstruction: document.querySelector("#requirement-instruction"),
   instructionLength: document.querySelector("#instruction-length"),
@@ -196,7 +197,8 @@ function renderRequirements() {
     const route = requirement.route_id
       ? `[${requirement.project}] ${requirement.method} ${requirement.path} · v${requirement.route_version}`
       : `[${requirement.project}] ${requirement.method} ${requirement.path} · 未发布`;
-    button.append(top, createElement("small", "", route));
+    const mode = requirement.execution_mode === "plugin" ? "插件" : "受限";
+    button.append(top, createElement("small", "", `${route} · ${mode}`));
     button.addEventListener("click", () => selectRequirement(requirement.id));
     elements.requirementList.append(button);
   }
@@ -225,10 +227,18 @@ function renderRoutes() {
     const header = createElement("div", "route-card-header");
     header.append(
       createElement("span", "method-chip", route.method),
+      createElement(
+        "span",
+        `mode-chip mode-${route.execution_mode}`,
+        route.execution_mode === "plugin" ? "PLUGIN" : "RESTRICTED",
+      ),
       createElement("small", "", `v${route.version}`),
     );
     card.append(header, createElement("strong", "", route.path));
     card.append(createElement("p", "", route.description || "动态处理器"));
+    if (route.artifact_digest) {
+      card.append(createElement("small", "artifact-digest", `sha256:${route.artifact_digest.slice(0, 12)}…`));
+    }
 
     const actions = createElement("div", "route-card-actions");
     const iterate = createElement("button", "text-button", "继续开发");
@@ -238,6 +248,12 @@ function renderRoutes() {
     call.type = "button";
     call.addEventListener("click", () => prepareRequest(route));
     actions.append(iterate, call);
+    if (route.execution_mode === "plugin" && route.version > 1) {
+      const rollback = createElement("button", "text-button warning-button", "回滚上一版");
+      rollback.type = "button";
+      rollback.addEventListener("click", () => rollbackRoute(route));
+      actions.append(rollback);
+    }
     card.append(actions);
     elements.routeList.append(card);
   }
@@ -292,6 +308,7 @@ function resetEditor() {
   elements.requirementId.value = "";
   elements.linkedRouteId.value = "";
   elements.routeMethod.value = "GET";
+  elements.executionMode.value = "restricted";
   elements.routeProject.value = "default";
   elements.routePath.value = "/hello";
   elements.instructionLength.textContent = "0";
@@ -319,6 +336,7 @@ async function selectRequirement(requirementId) {
   elements.requirementTitle.value = requirement.title;
   elements.routeProject.value = requirement.project;
   elements.routeMethod.value = requirement.method;
+  elements.executionMode.value = requirement.execution_mode || "restricted";
   elements.routePath.value = requirement.path;
   elements.requirementInstruction.value = requirement.instruction;
   elements.instructionLength.textContent = String(requirement.instruction.length);
@@ -347,6 +365,7 @@ function startFromRoute(route) {
   elements.requirementTitle.value = `迭代 ${route.method} ${route.path}`;
   elements.routeProject.value = route.project;
   elements.routeMethod.value = route.method;
+  elements.executionMode.value = route.execution_mode || "restricted";
   elements.routePath.value = route.path;
   elements.requirementInstruction.value = "";
   elements.instructionLength.textContent = "0";
@@ -387,6 +406,7 @@ function draftPayload() {
     instruction: elements.requirementInstruction.value.trim(),
     project: elements.routeProject.value.trim(),
     method: elements.routeMethod.value,
+    execution_mode: elements.executionMode.value,
     path: elements.routePath.value.trim(),
   };
   if (state.linkedRouteId) {
@@ -407,7 +427,11 @@ async function saveRequirement() {
       `/api/v1/manage/requirements/${encodeURIComponent(state.selectedRequirementId)}`,
       {
         method: "PATCH",
-        body: JSON.stringify({title: payload.title, instruction: payload.instruction}),
+        body: JSON.stringify({
+          title: payload.title,
+          instruction: payload.instruction,
+          execution_mode: payload.execution_mode,
+        }),
       },
     );
   } else {
@@ -420,6 +444,29 @@ async function saveRequirement() {
   await refreshData();
   showMessage("需求已保存到本地 SQLite。", "success");
   return saved;
+}
+
+async function rollbackRoute(route) {
+  const targetVersion = route.version - 1;
+  if (!window.confirm(`将 ${route.path} 的 v${targetVersion} 内容重新发布为 v${route.version + 1}？`)) {
+    return;
+  }
+  try {
+    const rolledBack = await managementRequest(
+      `/api/v1/manage/routes/${encodeURIComponent(route.route_id)}/rollback`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          target_version: targetVersion,
+          expected_version: route.version,
+        }),
+      },
+    );
+    await refreshData();
+    showToast(`已回滚并发布 v${rolledBack.version}。`);
+  } catch (error) {
+    showMessage(error.message, "error");
+  }
 }
 
 async function implementRequirement() {

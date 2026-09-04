@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from collections.abc import Awaitable, Callable
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 from self_grow_agent.llm import FeatureGenerator, GenerationCapacityError, GenerationError
+from self_grow_agent.models import PluginFeatureGenerator
 from self_grow_agent.pi_generator import SAFE_PI_GENERATION_FAILURE_MESSAGES
+from self_grow_agent.plugin_models import GeneratedPlugin
+from self_grow_agent.plugin_runtime import (
+    PluginPublicationError,
+    PluginPublisher,
+    load_published_plugin,
+)
+from self_grow_agent.plugin_validator import PluginValidationError
 from self_grow_agent.projects import DEFAULT_PROJECT
 from self_grow_agent.runtime import RouteAlreadyExistsError, RouteRecord, RouteRuntime
 
@@ -76,9 +86,13 @@ class AgentManagementService:
         self,
         runtime: RouteRuntime,
         generator: FeatureGenerator | None,
+        plugin_generator: PluginFeatureGenerator | None = None,
+        plugin_publisher: PluginPublisher | None = None,
     ) -> None:
         self.runtime = runtime
         self.generator = generator
+        self.plugin_generator = plugin_generator
+        self.plugin_publisher = plugin_publisher
 
     async def create_route(
         self,
@@ -87,6 +101,8 @@ class AgentManagementService:
         method: str,
         instruction: str,
         project: str = DEFAULT_PROJECT,
+        execution_mode: Literal["restricted", "plugin"] = "restricted",
+        operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
         normalized_path, normalized_method = self.runtime.validate_route(path, method)
@@ -95,6 +111,25 @@ class AgentManagementService:
         if existing is not None:
             raise RouteAlreadyExistsError(
                 f"route {normalized_method} {normalized_path} already exists"
+            )
+        if execution_mode == "plugin":
+            plugin = await self._generate_plugin(
+                instruction=instruction,
+                path=normalized_path,
+                method=normalized_method,
+                project=project,
+            )
+            publisher = self._require_plugin_publisher()
+            return await self._run_plugin_publication(
+                lambda callback: publisher.create(
+                    operation_id=operation_id or uuid.uuid4().hex,
+                    path=normalized_path,
+                    method=normalized_method,
+                    project=project,
+                    plugin=plugin,
+                    before_activate=callback,
+                ),
+                before_publish,
             )
         generated = await self._generate(
             instruction=instruction,
@@ -121,6 +156,8 @@ class AgentManagementService:
         route_id: str,
         instruction: str,
         expected_version: int,
+        execution_mode: Literal["restricted", "plugin"] | None = None,
+        operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
         current = self.runtime.get(route_id)
@@ -128,6 +165,32 @@ class AgentManagementService:
             raise ManagedRouteNotFoundError("managed route not found")
         if current.version != expected_version:
             raise ManagedVersionConflictError(expected_version, current.version)
+
+        target_mode = execution_mode or current.execution_mode
+        if target_mode == "plugin":
+            current_plugin = (
+                load_published_plugin(current.artifact_path)
+                if current.execution_mode == "plugin" and current.artifact_path is not None
+                else None
+            )
+            plugin = await self._generate_plugin(
+                instruction=instruction,
+                path=current.path,
+                method=current.method,
+                project=current.project,
+                current_plugin=current_plugin,
+            )
+            publisher = self._require_plugin_publisher()
+            return await self._run_plugin_publication(
+                lambda callback: publisher.update(
+                    operation_id=operation_id or uuid.uuid4().hex,
+                    route_id=route_id,
+                    expected_version=expected_version,
+                    plugin=plugin,
+                    before_activate=callback,
+                ),
+                before_publish,
+            )
 
         current_source = current.source
         generated = await self._generate(
@@ -153,6 +216,8 @@ class AgentManagementService:
         project: str,
         instruction: str,
         expected_version: int,
+        execution_mode: Literal["restricted", "plugin"] | None = None,
+        operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
         """Regenerate a handler for its target path, then atomically move it."""
@@ -165,6 +230,33 @@ class AgentManagementService:
 
         normalized_path, _ = self.runtime.validate_route(path, current.method)
         normalized_project = self.runtime.normalize_project(project)
+        target_mode = execution_mode or current.execution_mode
+        if target_mode == "plugin":
+            current_plugin = (
+                load_published_plugin(current.artifact_path)
+                if current.execution_mode == "plugin" and current.artifact_path is not None
+                else None
+            )
+            plugin = await self._generate_plugin(
+                instruction=instruction,
+                path=normalized_path,
+                method=current.method,
+                project=normalized_project,
+                current_plugin=current_plugin,
+            )
+            publisher = self._require_plugin_publisher()
+            return await self._run_plugin_publication(
+                lambda callback: publisher.move(
+                    operation_id=operation_id or uuid.uuid4().hex,
+                    route_id=route_id,
+                    path=normalized_path,
+                    project=normalized_project,
+                    expected_version=expected_version,
+                    plugin=plugin,
+                    before_activate=callback,
+                ),
+                before_publish,
+            )
         generated = await self._generate(
             instruction=instruction,
             path=normalized_path,
@@ -210,6 +302,60 @@ class AgentManagementService:
             raise FeatureGenerationError(_safe_generation_failure_message(exc)) from exc
         except Exception as exc:
             self._raise_generation_error(exc)
+
+    async def _generate_plugin(
+        self,
+        *,
+        instruction: str,
+        path: str,
+        method: str,
+        project: str,
+        current_plugin: GeneratedPlugin | None = None,
+    ) -> GeneratedPlugin:
+        if self.plugin_generator is None:
+            raise LLMUnavailableError("plugin generation is not configured")
+        try:
+            result = await self.plugin_generator.generate_plugin(
+                instruction=instruction,
+                path=path,
+                method=method,
+                project=project,
+                current_plugin=current_plugin,
+            )
+            if not isinstance(result, GeneratedPlugin):
+                raise GenerationError("Pi returned invalid plugin bundle")
+            return result
+        except GenerationCapacityError as exc:
+            raise FeatureGenerationCapacityError("generation capacity is full") from exc
+        except GenerationError as exc:
+            raise FeatureGenerationError(_safe_generation_failure_message(exc)) from exc
+        except Exception as exc:
+            self._raise_generation_error(exc)
+
+    def _require_plugin_publisher(self) -> PluginPublisher:
+        if self.plugin_publisher is None:
+            raise LLMUnavailableError("plugin publication is not configured")
+        return self.plugin_publisher
+
+    @staticmethod
+    async def _run_plugin_publication(
+        publish: Callable[[Callable[[str, int, str], None] | None], RouteRecord],
+        before_publish: PublicationHook | None,
+    ) -> RouteRecord:
+        callback: Callable[[str, int, str], None] | None = None
+        if before_publish is not None:
+            loop = asyncio.get_running_loop()
+
+            def callback(route_id: str, version: int, digest: str) -> None:
+                future = asyncio.run_coroutine_threadsafe(
+                    before_publish(route_id, version, digest), loop
+                )
+                future.result()
+
+        try:
+            return await asyncio.to_thread(publish, callback)
+        except (PluginPublicationError, PluginValidationError) as exc:
+            raise FeatureGenerationError(str(exc)[:256]) from exc
 
     @staticmethod
     def _raise_generation_error(exc: Exception) -> NoReturn:

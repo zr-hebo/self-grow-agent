@@ -33,7 +33,7 @@ export LLM_BASE_URL='https://api.deepseek.com'
 uv run python main.py
 ```
 
-若要改用 Pi RPC 后端，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`。第一阶段以 `--no-tools` 运行 Pi，只接收受约束的 handler 文本，不允许它编辑主仓库；完整配置和安全边界见[使用指南](docs/USAGE.md#使用-pi-coding-agent-后端)。
+若要生成带普通 import、多文件和测试的完整 API 插件，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`，并在请求中传 `"execution_mode":"plugin"`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
 
 服务默认监听 `127.0.0.1:8000`，入口会从 `config.py` 加载 `HOST` 和 `PORT`。动态业务处理器不依赖 Uvicorn 重启。
 启动后打开 [http://127.0.0.1:8000/console](http://127.0.0.1:8000/console)，输入本次启动使用的
@@ -75,6 +75,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
     "project": "quickstart",
     "path": "/quickstart/hello",
     "method": "GET",
+    "execution_mode": "restricted",
     "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
@@ -154,6 +155,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `POST` | `/api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 |
 | `PUT` | `/api/v1/manage/routes/{route_id}` | 通过 LLM 更新动态路由 |
 | `POST` | `/api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移路由 |
+| `POST` | `/api/v1/manage/routes/{route_id}/rollback` | 将插件旧版本重新发布为新的活动版本 |
 | `GET` | `/api/v1/manage/operations?requirement_id={id}` | 查看执行记录 |
 | `GET` | `/api/v1/manage/operations/{id}` | 查询一次异步执行的状态 |
 | `POST` | `/api/v1/manage/operations/{id}/retry` | 用失败记录创建新的异步重试任务 |
@@ -177,7 +179,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 }
 ```
 
-它必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。动态 API 的请求体统一使用 JSON：有请求体时会作为解析后的 JSON 值传入 `request["body"]`，无请求体时为 `null`。POST 参数默认从该对象读取；推荐客户端发送 `Content-Type: application/json`，而 `curl -d '{"name":"OK"}'` 的有效 JSON 也会被兼容解析。非 JSON 请求体返回 `422`。当前版本支持纯数据转换，刻意不支持导入模块、属性访问、循环、网络、文件或子进程操作。
+两种模式都必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。默认 `restricted` 模式只支持受限纯数据转换；显式 `plugin` 模式支持通过策略检查的普通 import、多文件和测试，仍禁止 shell、动态 import、任意文件访问及嵌入凭据。动态 API 的请求体统一使用 JSON：有请求体时会作为解析后的 JSON 值传入 `request["body"]`，无请求体时为 `null`。
 
 ## 配置
 
@@ -202,6 +204,10 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `PI_ADMISSION_TIMEOUT_SECONDS` | `1` | Pi 槽位已满时，生成请求允许等待的秒数 |
 | `PI_WORKSPACE_ROOT` | `generated/pi-workspaces` | Pi 临时工作目录父路径 |
 | `PI_PROVIDER_ENV_NAME` | `DEEPSEEK_API_KEY` | 在 Pi 子进程中承载 `LLM_API_KEY` 的环境变量名；须以 `API_KEY` 或 `TOKEN` 结尾 |
+| `PLUGIN_WORKSPACE_ROOT` | 系统临时目录下的 `self-grow-agent-workspaces` | 插件候选代码的外部、operation 级工作区 |
+| `PLUGIN_ARTIFACT_ROOT` | `generated/plugins` | 验证通过后的不可变插件版本目录 |
+| `PLUGIN_ALLOWED_DEPENDENCIES` | 空 | 允许插件声明的精确依赖 pin，逗号分隔；依赖必须预装 |
+| `PLUGIN_PROJECT_ENV_ALLOWLIST` | 空 | `project:ENV_NAME` 列表；只向指定项目的业务插件进程注入，Agent/LLM 密钥禁止配置 |
 | `GENERATED_DIR` | `generated` | 版本化处理器和清单目录 |
 | `METADATA_DB_PATH` | `generated/runtime-metadata.sqlite3` | 本地需求和实现事件 SQLite 数据库 |
 | `MAX_REQUEST_BODY_BYTES` | `1048576` | 动态业务请求体上限 |
@@ -224,6 +230,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 generated/
 ├── get-hello.v1.py
 ├── get-hello.v2.py
+├── plugins/<project>/<route-id>/vN/
 ├── routes.json
 └── runtime-metadata.sqlite3
 ```
@@ -250,6 +257,7 @@ make cicd
 uv run python -m cicd_case.run_tests health
 uv run python -m cicd_case.run_tests lifecycle
 uv run python -m cicd_case.run_tests coding_agent
+uv run python -m cicd_case.run_tests plugin
 
 # 查看和复现单个 case
 uv run python -m cicd_case.run_tests --list-cases
@@ -261,7 +269,7 @@ uv run python -m cicd_case.run_tests \
   --log-file cicd-logs/run_tests.log
 ```
 
-这些 case 会启动真实的 `main.py` 服务进程，并通过真实 TCP 请求验证管理鉴权、动态创建 `hello`、并发业务访问、控制台需求实现、SQLite 元数据重启恢复、无重启热更新、失败更新回滚、路由重启恢复，以及 Pi RPC 后端生成和发布。Responses API 和 Pi RPC 均由本地确定性 stub 提供，Agent 使用运行时随机凭据，因此本地和 CI 都不需要真实 LLM 凭据，也不会向外部 LLM 发请求。
+这些 case 会启动真实的 `main.py` 服务进程，并通过真实 TCP 请求验证管理鉴权、动态创建 `hello`、并发业务访问、控制台需求实现、SQLite 元数据重启恢复、无重启热更新、失败更新回滚、路由重启恢复，以及 Pi RPC 的受限处理器和完整插件生命周期。Responses API 和 Pi RPC 均由本地确定性 stub 提供，Agent 使用运行时随机凭据，因此本地和 CI 都不需要真实 LLM 凭据，也不会向外部 LLM 或包仓库发请求。
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) 在 pull request、`main` 分支 push 和手动触发时运行：先执行 Ruff、组件测试和编译检查，再执行独立 CI/CD 集成阶段；集成阶段无论成功或失败都会上传 `cicd-integration-logs` 制品。
 

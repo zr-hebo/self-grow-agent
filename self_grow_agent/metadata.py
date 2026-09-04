@@ -16,13 +16,18 @@ from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 RequirementStatus = Literal["draft", "implementing", "active", "failed"]
 OperationKind = Literal["create", "update", "move"]
 OperationStatus = Literal["accepted", "implementing", "finish", "failed"]
+ExecutionMode = Literal["restricted", "plugin"]
 INTERRUPTED_MESSAGE = "service restarted before implementation completed"
 OPERATION_INTERRUPTED_MESSAGE = "service restarted before operation completed"
 _REQUIREMENT_COLUMNS = {
     "project": "TEXT NOT NULL DEFAULT 'default'",
+    "execution_mode": "TEXT NOT NULL DEFAULT 'restricted'",
     "target_route_id": "TEXT",
     "target_route_version": "INTEGER",
     "target_source_sha256": "TEXT",
+}
+_OPERATION_COLUMNS = {
+    "execution_mode": "TEXT NOT NULL DEFAULT 'restricted'",
 }
 
 
@@ -56,6 +61,7 @@ class RequirementRecord:
     path: str
     method: str
     project: str
+    execution_mode: ExecutionMode
     route_id: str | None
     route_version: int | None
     status: RequirementStatus
@@ -87,6 +93,7 @@ class OperationRecord:
     path: str
     method: str
     project: str
+    execution_mode: ExecutionMode
     base_route_id: str | None
     base_route_version: int | None
     target_route_id: str | None
@@ -143,6 +150,12 @@ def _validate_source_sha256(value: str) -> str:
 def _validate_operation_kind(value: str) -> OperationKind:
     if value not in {"create", "update", "move"}:
         raise ValueError("operation kind is invalid")
+    return value  # type: ignore[return-value]
+
+
+def _validate_execution_mode(value: str) -> ExecutionMode:
+    if value not in {"restricted", "plugin"}:
+        raise ValueError("execution_mode must be 'restricted' or 'plugin'")
     return value  # type: ignore[return-value]
 
 
@@ -205,6 +218,9 @@ class RequirementStore:
                     path TEXT NOT NULL,
                     method TEXT NOT NULL,
                     project TEXT NOT NULL DEFAULT 'default',
+                    execution_mode TEXT NOT NULL DEFAULT 'restricted' CHECK (
+                        execution_mode IN ('restricted', 'plugin')
+                    ),
                     route_id TEXT,
                     route_version INTEGER,
                     target_route_id TEXT,
@@ -267,6 +283,9 @@ class RequirementStore:
                     path TEXT NOT NULL,
                     method TEXT NOT NULL,
                     project TEXT NOT NULL,
+                    execution_mode TEXT NOT NULL DEFAULT 'restricted' CHECK (
+                        execution_mode IN ('restricted', 'plugin')
+                    ),
                     base_route_id TEXT,
                     base_route_version INTEGER,
                     target_route_id TEXT,
@@ -303,6 +322,7 @@ class RequirementStore:
                 """
             )
             self._ensure_requirement_columns(connection)
+            self._ensure_operation_columns(connection)
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS requirements_updated_at_idx
@@ -349,6 +369,18 @@ class RequirementStore:
             if name not in existing:
                 connection.execute(
                     f"ALTER TABLE requirements ADD COLUMN {name} {declaration}"
+                )
+
+    @staticmethod
+    def _ensure_operation_columns(connection: sqlite3.Connection) -> None:
+        existing = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(operations)").fetchall()
+        }
+        for name, declaration in _OPERATION_COLUMNS.items():
+            if name not in existing:
+                connection.execute(
+                    f"ALTER TABLE operations ADD COLUMN {name} {declaration}"
                 )
 
     def recover_interrupted(
@@ -448,6 +480,7 @@ class RequirementStore:
         method: str,
         *,
         project: str = DEFAULT_PROJECT,
+        execution_mode: str = "restricted",
         route_id: str | None = None,
         route_version: int | None = None,
     ) -> RequirementRecord:
@@ -458,6 +491,7 @@ class RequirementStore:
         path = _validate_text("path", path)
         method = _validate_text("method", method)
         project = normalize_project(project)
+        execution_mode = _validate_execution_mode(execution_mode)
         route_id, route_version = _validate_route_link(route_id, route_version)
 
         requirement_id = uuid.uuid4().hex
@@ -467,9 +501,9 @@ class RequirementStore:
             connection.execute(
                 """
                 INSERT INTO requirements (
-                    id, title, instruction, path, method, project, route_id, route_version,
-                    status, last_error, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, title, instruction, path, method, project, execution_mode,
+                    route_id, route_version, status, last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     requirement_id,
@@ -478,6 +512,7 @@ class RequirementStore:
                     path,
                     method,
                     project,
+                    execution_mode,
                     route_id,
                     route_version,
                     "draft",
@@ -506,6 +541,7 @@ class RequirementStore:
         path: str,
         method: str,
         project: str,
+        execution_mode: str = "restricted",
         base_route_id: str | None = None,
         base_route_version: int | None = None,
     ) -> OperationRecord:
@@ -517,6 +553,7 @@ class RequirementStore:
         path = _validate_text("path", path)
         method = _validate_text("method", method)
         project = normalize_project(project)
+        execution_mode = _validate_execution_mode(execution_mode)
         base_route_id, base_route_version = _validate_route_link(
             base_route_id,
             base_route_version,
@@ -536,6 +573,7 @@ class RequirementStore:
                 path=path,
                 method=method,
                 project=project,
+                execution_mode=execution_mode,
                 base_route_id=base_route_id,
                 base_route_version=base_route_version,
                 timestamp=timestamp,
@@ -550,6 +588,7 @@ class RequirementStore:
         title: str,
         instruction: str,
         kind: str,
+        execution_mode: str | None = None,
         base_route_id: str | None = None,
         base_route_version: int | None = None,
     ) -> OperationRecord:
@@ -568,6 +607,9 @@ class RequirementStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._require_row(connection, requirement_id)
+            validated_execution_mode = _validate_execution_mode(
+                execution_mode or current["execution_mode"]
+            )
             if current["status"] == "implementing":
                 raise RequirementBusyError(
                     f"requirement {requirement_id!r} is being implemented"
@@ -577,7 +619,8 @@ class RequirementStore:
             connection.execute(
                 """
                 UPDATE requirements
-                SET title = ?, instruction = ?, route_id = ?, route_version = ?,
+                SET title = ?, instruction = ?, execution_mode = ?,
+                    route_id = ?, route_version = ?,
                     status = ?, last_error = NULL, target_route_id = NULL,
                     target_route_version = NULL, target_source_sha256 = NULL,
                     updated_at = ?
@@ -586,6 +629,7 @@ class RequirementStore:
                 (
                     title,
                     instruction,
+                    validated_execution_mode,
                     base_route_id,
                     base_route_version,
                     "draft",
@@ -611,6 +655,7 @@ class RequirementStore:
                 path=current["path"],
                 method=current["method"],
                 project=current["project"],
+                execution_mode=validated_execution_mode,
                 base_route_id=base_route_id,
                 base_route_version=base_route_version,
                 timestamp=timestamp,
@@ -833,6 +878,7 @@ class RequirementStore:
         *,
         title: str,
         instruction: str,
+        execution_mode: str | None = None,
     ) -> RequirementRecord:
         """Update editable content and return completed work to draft state."""
 
@@ -844,6 +890,9 @@ class RequirementStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._require_row(connection, requirement_id)
+            validated_execution_mode = _validate_execution_mode(
+                execution_mode or current["execution_mode"]
+            )
             from_status: RequirementStatus = current["status"]
             if from_status == "implementing":
                 raise RequirementBusyError(
@@ -855,12 +904,20 @@ class RequirementStore:
             connection.execute(
                 """
                 UPDATE requirements
-                SET title = ?, instruction = ?, status = ?, last_error = NULL,
+                SET title = ?, instruction = ?, execution_mode = ?, status = ?,
+                    last_error = NULL,
                     target_route_id = NULL, target_route_version = NULL,
                     target_source_sha256 = NULL, updated_at = ?
                 WHERE id = ?
                 """,
-                (title, instruction, to_status, timestamp, requirement_id),
+                (
+                    title,
+                    instruction,
+                    validated_execution_mode,
+                    to_status,
+                    timestamp,
+                    requirement_id,
+                ),
             )
             if to_status != from_status:
                 self._append_event(
@@ -1356,6 +1413,7 @@ class RequirementStore:
         path: str,
         method: str,
         project: str,
+        execution_mode: ExecutionMode,
         base_route_id: str | None,
         base_route_version: int | None,
         timestamp: str,
@@ -1364,9 +1422,10 @@ class RequirementStore:
             """
             INSERT INTO operations (
                 id, requirement_id, kind, instruction, path, method, project,
+                execution_mode,
                 base_route_id, base_route_version, status, last_error,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 operation_id,
@@ -1376,6 +1435,7 @@ class RequirementStore:
                 path,
                 method,
                 project,
+                execution_mode,
                 base_route_id,
                 base_route_version,
                 "accepted",
@@ -1426,6 +1486,7 @@ class RequirementStore:
             path=row["path"],
             method=row["method"],
             project=row["project"],
+            execution_mode=row["execution_mode"],
             route_id=row["route_id"],
             route_version=row["route_version"],
             status=row["status"],
@@ -1455,6 +1516,7 @@ class RequirementStore:
             path=row["path"],
             method=row["method"],
             project=row["project"],
+            execution_mode=row["execution_mode"],
             base_route_id=row["base_route_id"],
             base_route_version=row["base_route_version"],
             target_route_id=row["target_route_id"],

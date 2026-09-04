@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 import re
+import tempfile
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
@@ -27,6 +28,19 @@ _RESERVED_PI_PROVIDER_ENV_NAMES = frozenset(
         "TMP",
         "TMPDIR",
         "WINDIR",
+    }
+)
+_PLUGIN_ENV_ENTRY = re.compile(r"([a-z][a-z0-9-]{0,62}):([A-Z][A-Z0-9_]*)\Z")
+_RESERVED_PLUGIN_ENV_NAMES = frozenset(
+    {
+        "MANAGEMENT_API_KEY",
+        "LLM_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "PI_API_KEY",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
     }
 )
 
@@ -61,6 +75,14 @@ class Settings:
     pi_admission_timeout_seconds: float = 1.0
     pi_workspace_root: Path = Path("generated/pi-workspaces")
     pi_provider_env_name: str = "DEEPSEEK_API_KEY"
+    plugin_workspace_root: Path = Path(tempfile.gettempdir()) / "self-grow-agent-workspaces"
+    plugin_artifact_root: Path = Path("generated/plugins")
+    plugin_allowed_dependencies: tuple[str, ...] = ()
+    plugin_project_env_allowlist: tuple[str, ...] = ()
+    plugin_max_files: int = 32
+    plugin_max_file_bytes: int = 262_144
+    plugin_max_total_bytes: int = 1_048_576
+    plugin_keep_failed_workspaces: bool = True
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -99,10 +121,37 @@ class Settings:
             "PI_MAX_EVENT_STREAM_BYTES": self.pi_max_event_stream_bytes,
             "PI_MAX_CONCURRENT_RUNS": self.pi_max_concurrent_runs,
             "PI_ADMISSION_TIMEOUT_SECONDS": self.pi_admission_timeout_seconds,
+            "PLUGIN_MAX_FILES": self.plugin_max_files,
+            "PLUGIN_MAX_FILE_BYTES": self.plugin_max_file_bytes,
+            "PLUGIN_MAX_TOTAL_BYTES": self.plugin_max_total_bytes,
         }
         for name, value in positive_values.items():
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
+        if not isinstance(self.plugin_keep_failed_workspaces, bool):
+            raise ValueError("PLUGIN_KEEP_FAILED_WORKSPACES must be a boolean")
+        generated_dir = self.generated_dir.expanduser().resolve()
+        workspace_root = self.plugin_workspace_root.expanduser().resolve()
+        artifact_root = self.plugin_artifact_root.expanduser().resolve()
+        if (
+            workspace_root == generated_dir
+            or generated_dir in workspace_root.parents
+            or workspace_root == artifact_root
+            or workspace_root in artifact_root.parents
+            or artifact_root in workspace_root.parents
+        ):
+            raise ValueError("PLUGIN_WORKSPACE_ROOT must be outside generated artifacts")
+        if any(not dependency.strip() for dependency in self.plugin_allowed_dependencies):
+            raise ValueError("PLUGIN_ALLOWED_DEPENDENCIES contains an empty value")
+        seen_plugin_env: set[tuple[str, str]] = set()
+        for entry in self.plugin_project_env_allowlist:
+            match = _PLUGIN_ENV_ENTRY.fullmatch(entry)
+            if match is None or match.group(2) in _RESERVED_PLUGIN_ENV_NAMES:
+                raise ValueError("PLUGIN_PROJECT_ENV_ALLOWLIST contains an invalid entry")
+            key = (match.group(1), match.group(2))
+            if key in seen_plugin_env:
+                raise ValueError("PLUGIN_PROJECT_ENV_ALLOWLIST contains a duplicate entry")
+            seen_plugin_env.add(key)
 
 
 def load_settings() -> Settings:
@@ -111,6 +160,12 @@ def load_settings() -> Settings:
     generated_dir = Path(environ.get("GENERATED_DIR", str(_PROJECT_ROOT / "generated")))
     pi_workspace_root = Path(
         environ.get("PI_WORKSPACE_ROOT", str(generated_dir / "pi-workspaces"))
+    )
+    plugin_workspace_root = Path(
+        environ.get(
+            "PLUGIN_WORKSPACE_ROOT",
+            str(Path(tempfile.gettempdir()) / "self-grow-agent-workspaces"),
+        )
     )
     return Settings(
         host=environ.get("HOST", "127.0.0.1"),
@@ -150,4 +205,34 @@ def load_settings() -> Settings:
         ),
         pi_workspace_root=pi_workspace_root,
         pi_provider_env_name=environ.get("PI_PROVIDER_ENV_NAME", "DEEPSEEK_API_KEY"),
+        plugin_workspace_root=plugin_workspace_root,
+        plugin_artifact_root=Path(
+            environ.get("PLUGIN_ARTIFACT_ROOT", str(generated_dir / "plugins"))
+        ),
+        plugin_allowed_dependencies=tuple(
+            dependency.strip()
+            for dependency in environ.get("PLUGIN_ALLOWED_DEPENDENCIES", "").split(",")
+            if dependency.strip()
+        ),
+        plugin_project_env_allowlist=tuple(
+            entry.strip()
+            for entry in environ.get("PLUGIN_PROJECT_ENV_ALLOWLIST", "").split(",")
+            if entry.strip()
+        ),
+        plugin_max_files=int(environ.get("PLUGIN_MAX_FILES", "32")),
+        plugin_max_file_bytes=int(environ.get("PLUGIN_MAX_FILE_BYTES", "262144")),
+        plugin_max_total_bytes=int(environ.get("PLUGIN_MAX_TOTAL_BYTES", "1048576")),
+        plugin_keep_failed_workspaces=_parse_boolean(
+            "PLUGIN_KEEP_FAILED_WORKSPACES",
+            environ.get("PLUGIN_KEEP_FAILED_WORKSPACES", "true"),
+        ),
     )
+
+
+def _parse_boolean(name: str, value: str) -> bool:
+    normalized = value.strip().casefold()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be 'true' or 'false'")

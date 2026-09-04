@@ -494,3 +494,51 @@ def test_recovery_identifies_an_operation_interrupted_before_it_started(
         "(previous status: accepted)"
     )
     assert store.get(requirement.id).status == "draft"
+
+
+def test_execution_mode_is_persisted_in_requirement_and_operation(tmp_path: Path) -> None:
+    store = RequirementStore(tmp_path / "metadata.sqlite3")
+    requirement = store.create(
+        "Plugin route",
+        "Build complete plugin",
+        "/demo/run",
+        "POST",
+        project="demo",
+        execution_mode="plugin",
+    )
+
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+        execution_mode=requirement.execution_mode,
+    )
+
+    assert store.get(requirement.id).execution_mode == "plugin"
+    assert store.get_operation(operation.id).execution_mode == "plugin"
+
+
+def test_old_database_migrates_execution_mode_to_restricted(tmp_path: Path) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    store = RequirementStore(database)
+    requirement = store.create("Legacy", "Keep it", "/default/legacy", "GET")
+    operation = store.create_operation(
+        requirement.id,
+        kind="create",
+        instruction=requirement.instruction,
+        path=requirement.path,
+        method=requirement.method,
+        project=requirement.project,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE requirements DROP COLUMN execution_mode")
+        connection.execute("ALTER TABLE operations DROP COLUMN execution_mode")
+        connection.commit()
+
+    migrated = RequirementStore(database)
+
+    assert migrated.get(requirement.id).execution_mode == "restricted"
+    assert migrated.get_operation(operation.id).execution_mode == "restricted"

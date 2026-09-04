@@ -1,4 +1,5 @@
 import secrets
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,14 @@ SETTING_ENV_VARS = (
     "PI_ADMISSION_TIMEOUT_SECONDS",
     "PI_WORKSPACE_ROOT",
     "PI_PROVIDER_ENV_NAME",
+    "PLUGIN_WORKSPACE_ROOT",
+    "PLUGIN_ARTIFACT_ROOT",
+    "PLUGIN_ALLOWED_DEPENDENCIES",
+    "PLUGIN_PROJECT_ENV_ALLOWLIST",
+    "PLUGIN_MAX_FILES",
+    "PLUGIN_MAX_FILE_BYTES",
+    "PLUGIN_MAX_TOTAL_BYTES",
+    "PLUGIN_KEEP_FAILED_WORKSPACES",
 )
 
 
@@ -43,6 +52,8 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
     generated_dir = tmp_path / "runtime-handlers"
     metadata_db_path = tmp_path / "runtime-metadata.sqlite3"
     pi_workspace_root = tmp_path / "pi-workspaces"
+    plugin_workspace_root = tmp_path / "external-plugin-workspaces"
+    plugin_artifact_root = generated_dir / "plugins"
     values = {
         "HOST": "0.0.0.0",
         "PORT": "9100",
@@ -70,6 +81,14 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
         "PI_ADMISSION_TIMEOUT_SECONDS": "0.75",
         "PI_WORKSPACE_ROOT": str(pi_workspace_root),
         "PI_PROVIDER_ENV_NAME": "DEEPSEEK_API_KEY",
+        "PLUGIN_WORKSPACE_ROOT": str(plugin_workspace_root),
+        "PLUGIN_ARTIFACT_ROOT": str(plugin_artifact_root),
+        "PLUGIN_ALLOWED_DEPENDENCIES": "PyMySQL==1.1.1,httpx==0.28.1",
+        "PLUGIN_PROJECT_ENV_ALLOWLIST": "store:MYSQL_USER,store:MYSQL_PASSWORD",
+        "PLUGIN_MAX_FILES": "24",
+        "PLUGIN_MAX_FILE_BYTES": "131072",
+        "PLUGIN_MAX_TOTAL_BYTES": "524288",
+        "PLUGIN_KEEP_FAILED_WORKSPACES": "false",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -102,6 +121,20 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
     assert settings.pi_admission_timeout_seconds == 0.75
     assert settings.pi_workspace_root == pi_workspace_root
     assert settings.pi_provider_env_name == "DEEPSEEK_API_KEY"
+    assert settings.plugin_workspace_root == plugin_workspace_root
+    assert settings.plugin_artifact_root == plugin_artifact_root
+    assert settings.plugin_allowed_dependencies == (
+        "PyMySQL==1.1.1",
+        "httpx==0.28.1",
+    )
+    assert settings.plugin_project_env_allowlist == (
+        "store:MYSQL_USER",
+        "store:MYSQL_PASSWORD",
+    )
+    assert settings.plugin_max_files == 24
+    assert settings.plugin_max_file_bytes == 131_072
+    assert settings.plugin_max_total_bytes == 524_288
+    assert settings.plugin_keep_failed_workspaces is False
 
 
 def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
@@ -128,6 +161,16 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     assert settings.pi_admission_timeout_seconds == 1
     assert settings.pi_workspace_root == settings.generated_dir / "pi-workspaces"
     assert settings.pi_provider_env_name == "DEEPSEEK_API_KEY"
+    assert settings.plugin_workspace_root == (
+        Path(tempfile.gettempdir()) / "self-grow-agent-workspaces"
+    )
+    assert settings.plugin_artifact_root == settings.generated_dir / "plugins"
+    assert settings.plugin_allowed_dependencies == ()
+    assert settings.plugin_project_env_allowlist == ()
+    assert settings.plugin_max_files == 32
+    assert settings.plugin_max_file_bytes == 262_144
+    assert settings.plugin_max_total_bytes == 1_048_576
+    assert settings.plugin_keep_failed_workspaces is True
 
 
 @pytest.mark.parametrize(
@@ -155,6 +198,12 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
         ("pi_provider_env_name", "PATH"),
         ("pi_provider_env_name", "TMPDIR"),
         ("pi_provider_env_name", "NODE_OPTIONS"),
+        ("plugin_max_files", 0),
+        ("plugin_max_file_bytes", 0),
+        ("plugin_max_total_bytes", 0),
+        ("plugin_project_env_allowlist", ("store:MANAGEMENT_API_KEY",)),
+        ("plugin_project_env_allowlist", ("Invalid:MYSQL_PASSWORD",)),
+        ("plugin_project_env_allowlist", ("store:MYSQL_USER", "store:MYSQL_USER")),
     ],
 )
 def test_settings_reject_unsafe_values(field: str, value: object) -> None:
@@ -185,6 +234,14 @@ def test_settings_reject_unsafe_values(field: str, value: object) -> None:
         "pi_admission_timeout_seconds": 1.0,
         "pi_workspace_root": Path("generated/pi-workspaces"),
         "pi_provider_env_name": "DEEPSEEK_API_KEY",
+        "plugin_workspace_root": Path("/tmp/self-grow-agent-workspaces"),
+        "plugin_artifact_root": Path("generated/plugins"),
+        "plugin_allowed_dependencies": (),
+        "plugin_project_env_allowlist": (),
+        "plugin_max_files": 32,
+        "plugin_max_file_bytes": 262_144,
+        "plugin_max_total_bytes": 1_048_576,
+        "plugin_keep_failed_workspaces": True,
     }
     values[field] = value
 

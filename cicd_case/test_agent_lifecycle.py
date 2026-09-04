@@ -119,6 +119,7 @@ def test_dynamic_hello_create(agent_stack) -> None:
         "project": "default",
         "path": "/default/hello",
         "method": "GET",
+        "execution_mode": "restricted",
         "operation_url": f"/api/v1/manage/operations/{operation['operation_id']}",
     }
     assert operation["requirement_id"] != operation["operation_id"]

@@ -57,13 +57,16 @@ def test_create_activates_and_persists_route(runtime: RouteRuntime) -> None:
     assert record.handler({"query": {"name": "Ada"}})["message"] == "hello v1"
 
     manifest = json.loads((record.source_file.parent / "routes.json").read_text())
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["routes"] == [
         {
+            "artifact_digest": None,
+            "artifact_path": None,
             "description": "A greeting",
-                "method": "GET",
-                "path": "/hello",
-                "project": "default",
+            "execution_mode": "restricted",
+            "method": "GET",
+            "path": "/hello",
+            "project": "default",
             "route_id": "get-hello",
             "source_file": "get-hello.v1.py",
             "version": 1,
@@ -105,7 +108,11 @@ def test_legacy_manifest_routes_are_restored_in_the_default_project(
 ) -> None:
     created = runtime.create("/legacy", "GET", "legacy")
     manifest = json.loads(runtime.manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
     manifest["routes"][0].pop("project")
+    manifest["routes"][0].pop("execution_mode")
+    manifest["routes"][0].pop("artifact_path")
+    manifest["routes"][0].pop("artifact_digest")
     runtime.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     recovered = RouteRuntime(runtime.generated_dir, loader=FakeLoader())

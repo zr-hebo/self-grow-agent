@@ -162,6 +162,14 @@ export LLM_TIMEOUT_SECONDS='30'
 | `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek Responses API 的基础地址；可覆盖为其他兼容服务。 |
 | `LLM_MODEL` | `deepseek-v4-flash` | 用于生成处理器的默认 DeepSeek 模型。 |
 | `LLM_TIMEOUT_SECONDS` | `30` | 调用 LLM 的超时时间，单位为秒。 |
+| `PLUGIN_WORKSPACE_ROOT` | 系统临时目录下的 `self-grow-agent-workspaces` | operation 级插件候选工作区；必须与生成制品目录分离。 |
+| `PLUGIN_ARTIFACT_ROOT` | `generated/plugins` | 已验证的不可变插件版本。 |
+| `PLUGIN_ALLOWED_DEPENDENCIES` | 空 | 可声明的精确依赖 pin，逗号分隔；依赖必须预装。 |
+| `PLUGIN_PROJECT_ENV_ALLOWLIST` | 空 | `project:ENV_NAME` 项列表，只注入指定项目的业务插件进程。 |
+| `PLUGIN_MAX_FILES` | `32` | 单个插件 bundle 的文件数上限。 |
+| `PLUGIN_MAX_FILE_BYTES` | `262144` | 单个插件文件的 UTF-8 字节上限。 |
+| `PLUGIN_MAX_TOTAL_BYTES` | `1048576` | 单个插件全部源码的总字节上限。 |
+| `PLUGIN_KEEP_FAILED_WORKSPACES` | `true` | 是否保留失败候选工作区供本地诊断。生产环境通常设置为 `false`。 |
 
 这些变量会在导入 `main.py` 时读取为当前进程的配置快照。修改 LLM、监听地址或运行限制后，需要重启 Agent；通过管理 API 发布动态处理器则不需要重启。
 
@@ -205,7 +213,7 @@ Pi 进程以以下受控方式运行：
 
 Pi 的 `message_update` 等高频流式增量会被逐条校验和计数，但不会保留在内存结果中。`PI_MAX_EVENT_STREAM_BYTES` 限制单次 RPC 原始 JSONL 的累计传输量，默认 64 MiB；单条事件仍限制为 1 MiB，关键非流式事件仍最多保留 10,000 条。若模型确实需要更长输出，可在评估运行时间和带宽后提高该配置并重启服务。
 
-当前阶段有意保持原来的安全发布边界：Pi 最终仍必须返回一个受限的 `def handle(request)`，随后继续经过 JSON 解析、AST 白名单、试编译、SQLite 发布回执和原子热加载。它不会修改主仓库，也不能借此实现数据库迁移、依赖变更或跨文件 API。此类工程级变更需要后续的隔离代码快照、diff 审批和重启部署通道。
+Pi 根据请求的 `execution_mode` 返回两类结果：默认 `restricted` 返回单文件受限 `def handle(request)`；`plugin` 返回完整、多文件、带依赖声明和测试的 JSON bundle。Pi 本身仍不编辑主仓库。插件候选由 Agent 写入外部 operation 工作区，经过策略和测试门禁后发布到不可变制品目录。数据库 schema 迁移、平台依赖升级和管理面源码等核心工程变更不属于动态插件能力，仍需常规评审、部署和重启。
 
 Pi 官方明确说明其本身不是安全沙箱。当前阶段使用 `--no-tools`，只接受模型最终返回的文本；即使如此，公网、多租户或后续允许 Pi 操作源码的生产场景，仍必须在容器、微虚拟机或等价的外部沙箱中运行 Pi。参阅 [Pi RPC 文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)、[Provider 配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)和[安全说明](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)。
 
@@ -275,6 +283,7 @@ Agent 把 API 分为两个平面：
 | 管理面 | `POST /api/v1/manage/routes` | 创建后台 LLM 路由任务，返回 `202` 回执 | 必须提供 `X-Management-Key` |
 | 管理面 | `PUT /api/v1/manage/routes/{route_id}` | 让 LLM 替换现有路由逻辑 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/routes/{route_id}/move` | 异步重新生成并迁移现有路由 | 必须提供 `X-Management-Key` |
+| 管理面 | `POST /api/v1/manage/routes/{route_id}/rollback` | 将插件旧版本重新发布为新版本 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/operations?requirement_id={id}` | 查看需求的执行历史 | 必须提供 `X-Management-Key` |
 | 管理面 | `GET /api/v1/manage/operations/{id}` | 查询一次异步执行状态 | 必须提供 `X-Management-Key` |
 | 管理面 | `POST /api/v1/manage/operations/{id}/retry` | 用失败记录创建新的异步重试任务 | 必须提供 `X-Management-Key` |
@@ -350,6 +359,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "project": "demo",
     "path": "/demo/hello",
     "method": "GET",
+    "execution_mode": "restricted",
     "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
@@ -414,7 +424,9 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
     "method": "GET",
     "project": "demo",
     "version": 1,
-    "description": "Say hello"
+    "description": "Say hello",
+    "execution_mode": "restricted",
+    "artifact_digest": null
   }]
 }
 ```
@@ -443,7 +455,9 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/<route-id>" \
     "method": "GET",
     "project": "demo",
     "version": 2,
-    "description": "Greet by name"
+    "description": "Greet by name",
+    "execution_mode": "restricted",
+    "artifact_digest": null
   }
 }
 ```
@@ -467,6 +481,54 @@ curl -sS "$AGENT_URL/demo/hello"
 
 如果其他管理请求已经抢先更新了该路由，旧的 `expected_version` 会收到 HTTP `409`；重新查询路由列表，使用最新版本决定是否重试，避免无意覆盖他人的更新。
 
+## 完整 API 插件模式
+
+默认的 `restricted` 模式适合小型 JSON 数据转换。需要普通 Python import、多文件模块、第三方依赖声明和生成物测试时，使用 Pi 后端并显式选择 `plugin`：
+
+```bash
+export GENERATION_BACKEND=pi
+export PLUGIN_WORKSPACE_ROOT=/var/lib/self-grow-agent/workspaces
+export PLUGIN_ARTIFACT_ROOT="$PWD/generated/plugins"
+export PLUGIN_ALLOWED_DEPENDENCIES='PyMySQL==1.1.1'
+
+# 依赖由部署环境预装；生成过程不会访问包仓库。
+uv add 'PyMySQL==1.1.1'
+
+curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
+  -H 'Content-Type: application/json' \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY" \
+  -d '{
+    "path":"/rebuild_replication",
+    "method":"POST",
+    "project":"binlog-server",
+    "execution_mode":"plugin",
+    "instruction":"从 JSON body.raw-message 提取 Instance ip:port；使用 PyMySQL 连接并依次执行 stop slave 和 start slave；失败最多重试 2 次；返回每一步的安全结果并提供单元测试。凭据只能读取 request.runtime.environment 中的 MYSQL_USER 和 MYSQL_PASSWORD，不能返回凭据值。"
+  }'
+```
+
+候选 bundle 先写入 `PLUGIN_WORKSPACE_ROOT/<operation_id>`，再经过路径/依赖/AST 策略检查和生成测试。只有全部通过，才会发布到 `PLUGIN_ARTIFACT_ROOT/<project>/<route-id>/vN` 并原子切换活动路由。失败候选不会替换在线版本；`PLUGIN_KEEP_FAILED_WORKSPACES=false` 会自动清理失败工作区。
+
+业务插件默认拿不到任何父进程环境变量。确需数据库凭据时，由部署系统安全注入变量，并逐项允许给指定项目：
+
+```bash
+export MYSQL_USER='visit_user'
+: "${MYSQL_PASSWORD:?请由秘密管理器注入 MYSQL_PASSWORD}"
+export PLUGIN_PROJECT_ENV_ALLOWLIST='binlog-server:MYSQL_USER,binlog-server:MYSQL_PASSWORD'
+```
+
+`MANAGEMENT_API_KEY`、`LLM_API_KEY`、`DEEPSEEK_API_KEY`、Python loader 变量等不能加入该白名单；允许值会出现在该项目插件的 `request["runtime"]["environment"]` 中，也会注入该插件子进程环境，但不会进入生成 prompt、测试进程或 HTTP 请求日志。插件必须避免返回或自行记录这些值。可声明的第三方依赖必须同时满足：精确 `name==version`、位于 `PLUGIN_ALLOWED_DEPENDENCIES`、已经安装在运行环境中。
+
+查看路由返回的 `artifact_digest` 可核对当前不可变制品。将插件 v1 内容回滚并重新发布为 v3（版本始终单调递增）：
+
+```bash
+curl -sS -X POST "$AGENT_URL/api/v1/manage/routes/<route-id>/rollback" \
+  -H 'Content-Type: application/json' \
+  -H "X-Management-Key: $MANAGEMENT_API_KEY" \
+  -d '{"target_version":1,"expected_version":2}'
+```
+
+控制台也可选择“完整插件”、查看模式/制品摘要，并对插件执行“回滚上一版”。核心平台自身（FastAPI 管理路由、策略和执行器）的修改仍需正常代码发布与服务重启，动态插件只能扩展业务 API。
+
 ## Agent 如何自动生成并发布功能
 
 这里的“自动添加功能”是指：管理员发起 `POST` 或 `PUT` 管理请求后，Agent 自动完成生成、校验、持久化和热加载。Agent 不会在后台自行修改项目源码，也不会在没有管理请求的情况下主动添加功能。
@@ -475,7 +537,7 @@ curl -sS "$AGENT_URL/demo/hello"
 
 1. 管理 API 校验 `X-Management-Key`、请求字段、HTTP 方法和路径；更新操作还会先检查 `expected_version`。
 2. Agent 把自然语言指令、目标方法和路径发送给配置的直接 Responses API 或 Pi RPC 后端。更新时还会附带当前处理器的完整源码，要求模型返回完整替代版本。
-3. LLM 必须按严格 JSON Schema 返回 `source` 和 `description`。Agent 解析响应后，对源码执行 AST 白名单校验并试编译。
+3. `restricted` 模式要求 `source`/`description`，并执行严格 AST 白名单；`plugin` 模式要求完整多文件 bundle，依次执行依赖、源码策略和生成测试门禁。
 4. 校验通过后，Agent 先把目标路由版本和源码 SHA-256 作为发布回执写入 SQLite，再把源码版本文件和运行时路由清单写入 `GENERATED_DIR`（默认是 `generated`），最后替换内存中的活动路由。
 5. 后续业务请求会解析到最新路由版本，并在短生命周期子进程中重新加载和执行处理器，因此不需要重启 Uvicorn。
 6. 如果生成、校验、编译或持久化失败，候选版本不会成为活动版本；更新前的处理器会继续提供服务。若路由已发布但 SQLite 最终状态写入被打断，启动恢复或重复实现会用版本与源码哈希对账，补齐状态而不重复调用 LLM。进程重启时，Agent 会从 `GENERATED_DIR` 中的路由清单恢复最后成功发布的版本。
@@ -488,7 +550,7 @@ curl -sS "$AGENT_URL/demo/hello"
 
 > 从 `query` 读取 `name`，缺省为 `world`，返回 `{"message": "hello <name>"}`。该对象会被 Agent 自动放入业务响应的 `data` 字段。
 
-生成的处理器必须满足以下限制：
+默认 `restricted` 处理器必须满足以下限制：
 
 - 源码只能包含一个顶层同步函数，签名必须精确为 `def handle(request)`。
 - 不允许导入、装饰器、属性访问、循环、推导式、异步代码、生成器、异常、类、lambda、嵌套函数或私有标识符。
@@ -499,6 +561,8 @@ curl -sS "$AGENT_URL/demo/hello"
 - 只有显式白名单中的业务请求头会传给处理器；`Authorization`、Cookie、API Key 和管理密钥不会传入生成代码。
 
 LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和隔离子进程降低风险，但子进程仍使用服务进程的操作系统用户，不能替代容器、虚拟机或 seccomp 等强隔离。管理 API 应只放在可信网络或额外身份认证之后，并使用强密钥。
+
+`plugin` 模式放宽普通 import 和多文件限制，但不会放开 `os`、`subprocess`、`socket`、动态 import、任意文件访问、`eval`/`exec` 或硬编码凭据。它在本地仍是同用户 subprocess 隔离；生产环境应把 `PluginProcessExecutor` 替换为低权限容器/微虚拟机执行器，限制只读根文件系统、网络出口、CPU、内存和墙钟时间。
 
 ## 常见错误与排查
 
@@ -545,4 +609,7 @@ make cicd
 
 ```bash
 uv run python -m cicd_case.run_tests coding_agent
+
+# 完整插件创建、失败保留旧版、重试、重启恢复和回滚
+uv run python -m cicd_case.run_tests plugin
 ```

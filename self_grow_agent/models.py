@@ -32,4 +32,21 @@ class FeatureGenerator(Protocol):
         ...
 
 
+@runtime_checkable
+class PluginFeatureGenerator(Protocol):
+    """Dependency boundary for complete multi-file plugin generation."""
+
+    async def generate_plugin(
+        self,
+        *,
+        instruction: str,
+        path: str,
+        method: str,
+        project: str,
+        current_plugin: Any | None = None,
+    ) -> Any:
+        """Generate a complete replacement plugin bundle."""
+        ...
+
+
 Handler = Any

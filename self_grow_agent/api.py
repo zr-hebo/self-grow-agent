@@ -6,14 +6,16 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import secrets
 import time
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any, Generic, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 from zoneinfo import ZoneInfo
 
 from fastapi import (
@@ -51,9 +53,21 @@ from self_grow_agent.metadata import (
     RequirementStore,
     RequirementStoreError,
 )
+from self_grow_agent.models import PluginFeatureGenerator
 from self_grow_agent.observability import operation_log_context
 from self_grow_agent.pi_generator import PiFeatureGenerator
 from self_grow_agent.pi_rpc import PiRpcClient
+from self_grow_agent.plugin_executor import (
+    PluginProcessError,
+    PluginProcessExecutor,
+    PluginTimeoutError,
+)
+from self_grow_agent.plugin_generator import PiPluginGenerator
+from self_grow_agent.plugin_models import PluginPolicy
+from self_grow_agent.plugin_runtime import PluginPublicationError, PluginPublisher
+from self_grow_agent.plugin_test_runner import PluginTestRunner
+from self_grow_agent.plugin_validator import PluginValidator
+from self_grow_agent.plugin_workspace import PluginWorkspaceManager
 from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 from self_grow_agent.runtime import (
     ReservedPathError,
@@ -296,6 +310,7 @@ class CreateRouteRequest(BaseModel):
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
     project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
+    execution_mode: Literal["restricted", "plugin"] = "restricted"
     instruction: str = Field(min_length=1, max_length=8_000)
 
     _normalize_instruction = field_validator("instruction")(_required_text)
@@ -307,6 +322,7 @@ class UpdateRouteRequest(BaseModel):
 
     instruction: str = Field(min_length=1, max_length=8_000)
     expected_version: int = Field(ge=1)
+    execution_mode: Literal["restricted", "plugin"] | None = None
 
     _normalize_instruction = field_validator("instruction")(_required_text)
 
@@ -327,6 +343,13 @@ class MoveRouteRequest(BaseModel):
         return None if value is None else _required_text(value)
 
 
+class RollbackRouteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_version: int = Field(ge=1)
+    expected_version: int = Field(ge=1)
+
+
 class CreateRequirementRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -335,6 +358,7 @@ class CreateRequirementRequest(BaseModel):
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
     project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
+    execution_mode: Literal["restricted", "plugin"] = "restricted"
     route_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     _normalize_required_text = field_validator("title", "instruction")(_required_text)
@@ -346,6 +370,7 @@ class UpdateRequirementRequest(BaseModel):
 
     title: str = Field(min_length=1, max_length=120)
     instruction: str = Field(min_length=1, max_length=8_000)
+    execution_mode: Literal["restricted", "plugin"] | None = None
 
     _normalize_required_text = field_validator("title", "instruction")(_required_text)
 
@@ -357,6 +382,8 @@ class RouteResponse(BaseModel):
     project: str
     version: int
     description: str
+    execution_mode: Literal["restricted", "plugin"]
+    artifact_digest: str | None
 
     @classmethod
     def from_record(cls, record: RouteRecord) -> "RouteResponse":
@@ -367,6 +394,8 @@ class RouteResponse(BaseModel):
             project=record.project,
             version=record.version,
             description=record.description,
+            execution_mode=record.execution_mode,
+            artifact_digest=record.artifact_digest,
         )
 
 
@@ -387,6 +416,7 @@ class RouteTaskResponse(BaseModel):
     project: str
     path: str
     method: str
+    execution_mode: Literal["restricted", "plugin"]
     operation_url: str
 
 
@@ -397,6 +427,7 @@ class OperationResponse(BaseModel):
     path: str
     method: str
     project: str
+    execution_mode: Literal["restricted", "plugin"]
     base_route_id: str | None
     base_route_version: int | None
     target_route_id: str | None
@@ -415,6 +446,7 @@ class OperationResponse(BaseModel):
             path=record.path,
             method=record.method,
             project=record.project,
+            execution_mode=record.execution_mode,
             base_route_id=record.base_route_id,
             base_route_version=record.base_route_version,
             target_route_id=record.target_route_id,
@@ -433,6 +465,7 @@ class RequirementResponse(BaseModel):
     path: str
     method: str
     project: str
+    execution_mode: Literal["restricted", "plugin"]
     route_id: str | None
     route_version: int | None
     status: str
@@ -449,6 +482,7 @@ class RequirementResponse(BaseModel):
             path=record.path,
             method=record.method,
             project=record.project,
+            execution_mode=record.execution_mode,
             route_id=record.route_id,
             route_version=record.route_version,
             status=_public_requirement_status(record.status),
@@ -486,18 +520,8 @@ def _build_generator(settings: Settings) -> FeatureGenerator | None:
     if not settings.llm_api_key:
         return None
     if settings.generation_backend == "pi":
-        rpc_client = PiRpcClient(
-            command=(settings.pi_executable,),
-            provider=settings.pi_provider,
-            model=settings.pi_model,
-            api_key=settings.llm_api_key,
-            provider_env_name=settings.pi_provider_env_name,
-            timeout_seconds=settings.pi_timeout_seconds,
-            max_event_stream_bytes=settings.pi_max_event_stream_bytes,
-            workspace_root=settings.pi_workspace_root,
-        )
         return PiFeatureGenerator(
-            rpc_client=rpc_client,
+            rpc_client=_build_pi_rpc_client(settings),
             max_concurrent_runs=settings.pi_max_concurrent_runs,
             admission_timeout_seconds=settings.pi_admission_timeout_seconds,
         )
@@ -509,11 +533,40 @@ def _build_generator(settings: Settings) -> FeatureGenerator | None:
     )
 
 
+def _build_pi_rpc_client(settings: Settings) -> PiRpcClient:
+    return PiRpcClient(
+        command=(settings.pi_executable,),
+        provider=settings.pi_provider,
+        model=settings.pi_model,
+        api_key=settings.llm_api_key,
+        provider_env_name=settings.pi_provider_env_name,
+        timeout_seconds=settings.pi_timeout_seconds,
+        max_event_stream_bytes=settings.pi_max_event_stream_bytes,
+        workspace_root=settings.pi_workspace_root,
+    )
+
+
+def _build_plugin_generator(settings: Settings) -> PluginFeatureGenerator | None:
+    if not settings.llm_api_key or settings.generation_backend != "pi":
+        return None
+    return PiPluginGenerator(
+        rpc_client=_build_pi_rpc_client(settings),
+        policy=PluginPolicy(
+            allowed_dependencies=frozenset(settings.plugin_allowed_dependencies),
+            max_files=settings.plugin_max_files,
+            max_file_bytes=settings.plugin_max_file_bytes,
+            max_total_bytes=settings.plugin_max_total_bytes,
+        ),
+        max_concurrent_runs=settings.pi_max_concurrent_runs,
+        admission_timeout_seconds=settings.pi_admission_timeout_seconds,
+    )
+
+
 def _safe_requirement_error(exc: Exception) -> str:
     """Return a persistent failure message that cannot expose provider details."""
 
     if isinstance(exc, LLMUnavailableError):
-        return "LLM is not configured"
+        return str(exc)
     if isinstance(exc, FeatureGenerationError):
         return str(exc)
     if isinstance(exc, FeatureGenerationCapacityError):
@@ -547,6 +600,16 @@ def _safe_handler_error(exc: Exception) -> str:
 
 def _source_sha256(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _route_publication_digest(route: RouteRecord) -> str:
+    if route.execution_mode == "plugin":
+        if route.artifact_digest is None:
+            raise RoutePersistenceError("plugin route has no artifact digest")
+        return route.artifact_digest
+    if route.source is None:
+        raise RoutePersistenceError("restricted route has no generated source")
+    return _source_sha256(route.source)
 
 
 def _route_requirement_title(project: str, method: str, path: str) -> str:
@@ -586,7 +649,7 @@ def _route_move_instruction(
 
 def _active_publications(runtime: RouteRuntime) -> dict[str, tuple[int, str]]:
     return {
-        route.route_id: (route.version, _source_sha256(route.source))
+        route.route_id: (route.version, _route_publication_digest(route))
         for route in runtime.list()
     }
 
@@ -658,8 +721,11 @@ def create_app(
     *,
     settings: Settings | None = None,
     generator: FeatureGenerator | None = None,
+    plugin_generator: PluginFeatureGenerator | None = None,
+    plugin_publisher: PluginPublisher | None = None,
     runtime: RouteRuntime | None = None,
     handler_executor: HandlerExecutor | None = None,
+    plugin_executor: PluginProcessExecutor | None = None,
     requirement_store: RequirementStore | None = None,
     lifespan: Any | None = None,
     async_route_creation: bool = True,
@@ -667,11 +733,38 @@ def create_app(
     """Build one application instance, allowing deterministic dependency injection."""
 
     active_settings = settings or load_settings()
-    active_runtime = runtime or RouteRuntime(active_settings.generated_dir)
+    active_runtime = runtime or RouteRuntime(
+        active_settings.generated_dir,
+        plugin_artifact_root=active_settings.plugin_artifact_root,
+    )
     active_generator = generator
     if active_generator is None and active_settings.llm_api_key:
         active_generator = _build_generator(active_settings)
-    service = AgentManagementService(active_runtime, active_generator)
+    active_plugin_generator = plugin_generator
+    if active_plugin_generator is None and active_settings.llm_api_key:
+        active_plugin_generator = _build_plugin_generator(active_settings)
+    plugin_policy = PluginPolicy(
+        allowed_dependencies=frozenset(active_settings.plugin_allowed_dependencies),
+        max_files=active_settings.plugin_max_files,
+        max_file_bytes=active_settings.plugin_max_file_bytes,
+        max_total_bytes=active_settings.plugin_max_total_bytes,
+    )
+    active_plugin_publisher = plugin_publisher or PluginPublisher(
+        runtime=active_runtime,
+        workspace_manager=PluginWorkspaceManager(
+            workspace_root=active_settings.plugin_workspace_root,
+            artifact_root=active_runtime.plugin_artifact_root,
+        ),
+        validator=PluginValidator(plugin_policy),
+        test_runner=PluginTestRunner(timeout_seconds=30),
+        keep_failed_workspaces=active_settings.plugin_keep_failed_workspaces,
+    )
+    service = AgentManagementService(
+        active_runtime,
+        active_generator,
+        active_plugin_generator,
+        active_plugin_publisher,
+    )
     owns_requirement_store = requirement_store is None
     active_requirement_store = requirement_store or RequirementStore(
         active_settings.metadata_db_path
@@ -682,7 +775,38 @@ def create_app(
         cpu_limit_seconds=active_settings.handler_cpu_limit_seconds,
         max_result_bytes=active_settings.max_handler_result_bytes,
     )
+    plugin_environments: dict[str, dict[str, str]] = {}
+    for entry in active_settings.plugin_project_env_allowlist:
+        project, environment_name = entry.split(":", 1)
+        if environment_name in os.environ:
+            plugin_environments.setdefault(project, {})[environment_name] = os.environ[
+                environment_name
+            ]
+    plugin_executors: dict[str, PluginProcessExecutor] = {}
+
+    def plugin_executor_for(project: str) -> PluginProcessExecutor:
+        if plugin_executor is not None:
+            return plugin_executor
+        if project not in plugin_executors:
+            plugin_executors[project] = PluginProcessExecutor(
+                timeout_seconds=active_settings.handler_timeout_seconds,
+                memory_limit_bytes=active_settings.handler_memory_limit_mb * 1024 * 1024,
+                cpu_limit_seconds=active_settings.handler_cpu_limit_seconds,
+                max_result_bytes=active_settings.max_handler_result_bytes,
+                max_request_bytes=active_settings.max_request_body_bytes,
+                allowed_environment=plugin_environments.get(project),
+            )
+        return plugin_executors[project]
+
+    active_plugin_executor = plugin_executor_for(DEFAULT_PROJECT)
     handler_slots = asyncio.Semaphore(active_settings.max_concurrent_handlers)
+
+    def generation_is_available(execution_mode: str) -> bool:
+        return (
+            active_plugin_generator is not None
+            if execution_mode == "plugin"
+            else active_generator is not None
+        )
 
     @asynccontextmanager
     async def application_lifespan(lifespan_app: FastAPI) -> AsyncIterator[Any]:
@@ -712,7 +836,10 @@ def create_app(
     app.state.settings = active_settings
     app.state.runtime = active_runtime
     app.state.management_service = service
+    app.state.plugin_generator = active_plugin_generator
+    app.state.plugin_publisher = active_plugin_publisher
     app.state.handler_executor = active_handler_executor
+    app.state.plugin_executor = active_plugin_executor
     app.state.requirement_store = active_requirement_store
 
     def release_handler_slot(completed: asyncio.Future[Any]) -> None:
@@ -790,10 +917,13 @@ def create_app(
 
     @app.exception_handler(LLMUnavailableError)
     async def llm_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
-        del request, exc
+        del request
+        message = str(exc)
+        if message not in {"LLM is not configured", "plugin generation requires the Pi backend"}:
+            message = "LLM is not configured"
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "LLM is not configured"),
+            content=_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, message),
         )
 
     @app.exception_handler(FeatureGenerationError)
@@ -828,6 +958,16 @@ def create_app(
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content=_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, "route publication failed"),
+        )
+
+    @app.exception_handler(PluginPublicationError)
+    async def plugin_publication_error_handler(
+        request: Request, exc: PluginPublicationError
+    ) -> JSONResponse:
+        del request
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=_api_error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)[:256]),
         )
 
     @app.exception_handler(RequirementNotFoundError)
@@ -956,12 +1096,17 @@ def create_app(
                 method=payload.method,
                 project=payload.project,
                 instruction=payload.instruction,
+                execution_mode=payload.execution_mode,
             )
             response.status_code = status.HTTP_201_CREATED
             return _api_success(RouteResponse.from_record(record))
 
-        if active_generator is None:
-            raise LLMUnavailableError("LLM is not configured")
+        if not generation_is_available(payload.execution_mode):
+            raise LLMUnavailableError(
+                "plugin generation requires the Pi backend"
+                if payload.execution_mode == "plugin"
+                else "LLM is not configured"
+            )
         normalized_path, normalized_method = active_runtime.validate_route(
             public_path,
             payload.method,
@@ -977,6 +1122,7 @@ def create_app(
             normalized_path,
             normalized_method,
             project=payload.project,
+            execution_mode=payload.execution_mode,
         )
         operation = await asyncio.to_thread(
             active_requirement_store.create_operation,
@@ -986,6 +1132,7 @@ def create_app(
             path=requirement.path,
             method=requirement.method,
             project=requirement.project,
+            execution_mode=requirement.execution_mode,
         )
         _logger.info(
             "route_task state_transition operation_id=%s requirement_id=%s kind=create "
@@ -1006,6 +1153,7 @@ def create_app(
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
+                execution_mode=requirement.execution_mode,
                 operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
@@ -1021,6 +1169,7 @@ def create_app(
             route_id=route_id,
             instruction=payload.instruction,
             expected_version=payload.expected_version,
+            execution_mode=payload.execution_mode,
         )
         return _api_success(RouteResponse.from_record(record))
 
@@ -1032,11 +1181,15 @@ def create_app(
         tags=["management"],
     )
     async def move_route(route_id: str, payload: MoveRouteRequest) -> dict[str, Any]:
-        if active_generator is None:
-            raise LLMUnavailableError("LLM is not configured")
         current = active_runtime.get(route_id)
         if current is None:
             raise ManagedRouteNotFoundError("managed route not found")
+        if not generation_is_available(current.execution_mode):
+            raise LLMUnavailableError(
+                "plugin generation requires the Pi backend"
+                if current.execution_mode == "plugin"
+                else "LLM is not configured"
+            )
         if current.version != payload.expected_version:
             raise ManagedVersionConflictError(payload.expected_version, current.version)
         public_path = _public_route_path(payload.project, payload.path)
@@ -1064,6 +1217,7 @@ def create_app(
             normalized_path,
             normalized_method,
             project=payload.project,
+            execution_mode=current.execution_mode,
             route_id=current.route_id,
             route_version=current.version,
         )
@@ -1075,6 +1229,7 @@ def create_app(
             path=requirement.path,
             method=requirement.method,
             project=requirement.project,
+            execution_mode=requirement.execution_mode,
             base_route_id=current.route_id,
             base_route_version=current.version,
         )
@@ -1099,9 +1254,46 @@ def create_app(
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
+                execution_mode=requirement.execution_mode,
                 operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
+
+    @app.post(
+        "/api/v1/manage/routes/{route_id}/rollback",
+        response_model=ApiResponse[RouteResponse],
+        dependencies=[management_auth],
+        tags=["management"],
+    )
+    async def rollback_plugin_route(
+        route_id: str, payload: RollbackRouteRequest
+    ) -> dict[str, Any]:
+        current = active_runtime.get(route_id)
+        if current is None:
+            raise ManagedRouteNotFoundError("managed route not found")
+        if current.execution_mode != "plugin":
+            raise RouteValidationError("only plugin routes can be rolled back")
+        if current.version != payload.expected_version:
+            raise ManagedVersionConflictError(payload.expected_version, current.version)
+        if payload.target_version >= current.version:
+            raise RouteValidationError("target version must be older than current version")
+        operation_id = uuid.uuid4().hex
+        _logger.info(
+            "plugin_rollback accepted operation_id=%s route_id=%s "
+            "from_version=%s target_version=%s",
+            operation_id,
+            route_id,
+            current.version,
+            payload.target_version,
+        )
+        record = await asyncio.to_thread(
+            active_plugin_publisher.rollback,
+            operation_id=operation_id,
+            route_id=route_id,
+            target_version=payload.target_version,
+            expected_version=payload.expected_version,
+        )
+        return _api_success(RouteResponse.from_record(record))
 
     @app.get(
         "/api/v1/manage/operations",
@@ -1152,6 +1344,12 @@ def create_app(
                 f"operation {operation_id!r} cannot retry from status "
                 f"{previous.status!r}"
             )
+        if not generation_is_available(previous.execution_mode):
+            raise LLMUnavailableError(
+                "plugin generation requires the Pi backend"
+                if previous.execution_mode == "plugin"
+                else "LLM is not configured"
+            )
 
         requirement = await asyncio.to_thread(
             active_requirement_store.get,
@@ -1160,6 +1358,7 @@ def create_app(
         retry_path = previous.path
         retry_method = previous.method
         retry_project = previous.project
+        retry_execution_mode = previous.execution_mode
         base_route_id: str | None = None
         base_route_version: int | None = None
 
@@ -1191,6 +1390,7 @@ def create_app(
             path=retry_path,
             method=retry_method,
             project=retry_project,
+            execution_mode=retry_execution_mode,
             base_route_id=base_route_id,
             base_route_version=base_route_version,
         )
@@ -1217,6 +1417,7 @@ def create_app(
                 project=retry.project,
                 path=retry.path,
                 method=retry.method,
+                execution_mode=retry.execution_mode,
                 operation_url=f"/api/v1/manage/operations/{retry.id}",
             )
         )
@@ -1291,6 +1492,11 @@ def create_app(
             normalized_path,
             normalized_method,
             project=payload.project,
+            execution_mode=(
+                linked_route.execution_mode
+                if linked_route is not None
+                else payload.execution_mode
+            ),
             route_id=route_id,
             route_version=route_version,
         )
@@ -1311,6 +1517,7 @@ def create_app(
             requirement_id,
             title=payload.title,
             instruction=payload.instruction,
+            execution_mode=payload.execution_mode,
         )
         return _api_success(RequirementResponse.from_record(record))
 
@@ -1379,7 +1586,7 @@ def create_app(
         requirement_id: str,
         route: RouteRecord,
     ) -> RequirementRecord:
-        source_sha256 = _source_sha256(route.source)
+        source_sha256 = _route_publication_digest(route)
         for attempt in range(_REQUIREMENT_FINALIZE_ATTEMPTS):
             try:
                 return await asyncio.to_thread(
@@ -1445,6 +1652,9 @@ def create_app(
         work_path = operation.path if operation is not None else requirement.path
         work_method = operation.method if operation is not None else requirement.method
         work_project = operation.project if operation is not None else requirement.project
+        work_execution_mode = (
+            operation.execution_mode if operation is not None else requirement.execution_mode
+        )
         base_route_id = (
             operation.base_route_id if operation is not None else requirement.route_id
         )
@@ -1466,7 +1676,7 @@ def create_app(
         )
         _logger.info(
             "route_task generation_started operation_id=%s requirement_id=%s "
-            "project=%s method=%s path=%s mode=%s instruction_chars=%s",
+            "project=%s method=%s path=%s mode=%s execution_mode=%s instruction_chars=%s",
             work_id,
             requirement_id,
             work_project,
@@ -1475,6 +1685,7 @@ def create_app(
             operation.kind
             if operation is not None
             else ("update" if base_route_id is not None else "create"),
+            work_execution_mode,
             len(work_instruction),
         )
 
@@ -1483,12 +1694,17 @@ def create_app(
             route_version: int,
             source: str,
         ) -> None:
+            publication_digest = (
+                source
+                if work_execution_mode == "plugin"
+                else _source_sha256(source)
+            )
             await asyncio.to_thread(
                 active_requirement_store.prepare_publication,
                 requirement_id,
                 route_id=route_id,
                 route_version=route_version,
-                source_sha256=_source_sha256(source),
+                source_sha256=publication_digest,
             )
             if operation is not None:
                 await asyncio.to_thread(
@@ -1496,7 +1712,7 @@ def create_app(
                     operation.id,
                     route_id=route_id,
                     route_version=route_version,
-                    source_sha256=_source_sha256(source),
+                    source_sha256=publication_digest,
                 )
             _logger.info(
                 "route_task publication_prepared operation_id=%s requirement_id=%s "
@@ -1515,6 +1731,8 @@ def create_app(
                     method=work_method,
                     project=work_project,
                     instruction=work_instruction,
+                    execution_mode=work_execution_mode,
+                    operation_id=work_id,
                     before_publish=prepare_publication,
                 )
             else:
@@ -1549,6 +1767,8 @@ def create_app(
                         project=work_project,
                         instruction=work_instruction,
                         expected_version=base_route_version,
+                        execution_mode=work_execution_mode,
+                        operation_id=work_id,
                         before_publish=prepare_publication,
                     )
                     await asyncio.to_thread(
@@ -1565,6 +1785,8 @@ def create_app(
                         route_id=base_route_id,
                         instruction=work_instruction,
                         expected_version=base_route_version,
+                        execution_mode=work_execution_mode,
+                        operation_id=work_id,
                         before_publish=prepare_publication,
                     )
         except asyncio.CancelledError:
@@ -1698,8 +1920,6 @@ def create_app(
     ) -> dict[str, Any]:
         """Persist a revision and start its implementation as one async operation."""
 
-        if active_generator is None:
-            raise LLMUnavailableError("LLM is not configured")
         current_requirement = await asyncio.to_thread(
             active_requirement_store.get,
             requirement_id,
@@ -1719,12 +1939,22 @@ def create_app(
                     "linked route does not match the requirement project, method, and path"
                 )
             operation_kind = "update"
+        target_execution_mode = (
+            payload.execution_mode or current_requirement.execution_mode
+        )
+        if not generation_is_available(target_execution_mode):
+            raise LLMUnavailableError(
+                "plugin generation requires the Pi backend"
+                if target_execution_mode == "plugin"
+                else "LLM is not configured"
+            )
         operation = await asyncio.to_thread(
             active_requirement_store.revise_and_create_operation,
             requirement_id,
             title=payload.title,
             instruction=payload.instruction,
             kind=operation_kind,
+            execution_mode=target_execution_mode,
             base_route_id=current_route.route_id if current_route is not None else None,
             base_route_version=(
                 current_route.version if current_route is not None else None
@@ -1756,6 +1986,7 @@ def create_app(
                 project=requirement.project,
                 path=requirement.path,
                 method=requirement.method,
+                execution_mode=operation.execution_mode,
                 operation_url=f"/api/v1/manage/operations/{operation.id}",
             )
         )
@@ -1771,6 +2002,12 @@ def create_app(
             active_requirement_store.get,
             requirement_id,
         )
+        if not generation_is_available(current.execution_mode):
+            raise LLMUnavailableError(
+                "plugin generation requires the Pi backend"
+                if current.execution_mode == "plugin"
+                else "LLM is not configured"
+            )
         if current.status == "implementing":
             current = await asyncio.to_thread(
                 active_requirement_store.reconcile_publication,
@@ -1824,18 +2061,33 @@ def create_app(
                 _request_parameters_for_log(context["query"]),
                 _request_parameters_for_log(context["body"]),
             )
-            module_name = f"dynamic_{record.route_id.replace('-', '_')}_v{record.version}"
             try:
-                execution = asyncio.get_running_loop().run_in_executor(
-                    None,
-                    active_handler_executor.execute,
-                    record.source,
-                    module_name,
-                    context,
-                )
+                if record.execution_mode == "plugin":
+                    if record.artifact_path is None or record.artifact_digest is None:
+                        raise PluginProcessError("plugin artifact is unavailable")
+                    execution = asyncio.get_running_loop().run_in_executor(
+                        None,
+                        plugin_executor_for(record.project).execute,
+                        record.artifact_path,
+                        record.artifact_digest,
+                        context,
+                    )
+                else:
+                    if record.source is None:
+                        raise HandlerProcessError("Generated handler source is unavailable")
+                    module_name = (
+                        f"dynamic_{record.route_id.replace('-', '_')}_v{record.version}"
+                    )
+                    execution = asyncio.get_running_loop().run_in_executor(
+                        None,
+                        active_handler_executor.execute,
+                        record.source,
+                        module_name,
+                        context,
+                    )
                 execution.add_done_callback(release_handler_slot)
                 return _api_success(await asyncio.shield(execution))
-            except HandlerTimeoutError:
+            except (HandlerTimeoutError, PluginTimeoutError):
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail="dynamic handler timed out",
@@ -1853,7 +2105,7 @@ def create_app(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=message,
                 ) from None
-            except HandlerProcessError as exc:
+            except (HandlerProcessError, PluginProcessError) as exc:
                 message = _safe_handler_error(exc)
                 _logger.warning(
                     "dynamic_route failed route_id=%s method=%s path=%s error=%s",

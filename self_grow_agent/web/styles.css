@@ -483,6 +483,7 @@ h3 {
 
 .status-chip,
 .method-chip,
+.mode-chip,
 .count-badge {
   display: inline-flex;
   align-items: center;
@@ -492,6 +493,27 @@ h3 {
   font-size: 0.62rem;
   font-weight: 800;
   letter-spacing: 0.04em;
+}
+
+.mode-chip {
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.mode-plugin {
+  border-color: rgba(112, 167, 255, 0.35);
+  color: var(--blue);
+  background: rgba(112, 167, 255, 0.08);
+}
+
+.artifact-digest {
+  overflow-wrap: anywhere;
+}
+
+.warning-button {
+  color: var(--amber);
 }
 
 .status-chip {

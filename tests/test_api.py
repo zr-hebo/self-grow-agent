@@ -21,6 +21,9 @@ from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.observability import current_operation_id
+from self_grow_agent.plugin_executor import PluginProcessExecutor
+from self_grow_agent.plugin_models import GeneratedPlugin, PluginFile
+from self_grow_agent.plugin_runtime import _publish_artifact
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
 
 
@@ -109,6 +112,32 @@ class AsyncBlockingFeatureGenerator:
         self.started.set()
         await self.release.wait()
         return self._result
+
+
+class FakePluginGenerator:
+    def __init__(self, *plugins: GeneratedPlugin) -> None:
+        self._plugins: Iterator[GeneratedPlugin] = iter(plugins)
+        self.calls: list[dict[str, object]] = []
+
+    async def generate_plugin(
+        self,
+        *,
+        instruction: str,
+        path: str,
+        method: str,
+        project: str,
+        current_plugin: GeneratedPlugin | None = None,
+    ) -> GeneratedPlugin:
+        self.calls.append(
+            {
+                "instruction": instruction,
+                "path": path,
+                "method": method,
+                "project": project,
+                "current_plugin": current_plugin,
+            }
+        )
+        return next(self._plugins)
 
 
 class InlineHandlerExecutor:
@@ -211,6 +240,8 @@ def make_settings(tmp_path: Path, *, llm_api_key: str = "") -> Settings:
         llm_timeout_seconds=5.0,
         generated_dir=tmp_path / "generated",
         metadata_db_path=tmp_path / "runtime-metadata.sqlite3",
+        plugin_workspace_root=tmp_path / "plugin-workspaces",
+        plugin_artifact_root=tmp_path / "generated" / "plugins",
     )
 
 
@@ -223,6 +254,157 @@ def api_data(response: httpx.Response) -> object:
     assert payload["code"] == 0
     assert payload["message"] == "OK"
     return payload["data"]
+
+
+def test_plugin_route_dispatches_through_immutable_artifact(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(
+        settings.generated_dir,
+        plugin_artifact_root=settings.generated_dir / "plugins",
+    )
+    plugin = GeneratedPlugin(
+        files=(
+            PluginFile(
+                path="handler.py",
+                content=(
+                    "import json\n\n"
+                    "def handle(request):\n"
+                    "    return json.loads(json.dumps(request['body']))\n"
+                ),
+            ),
+            PluginFile(path="tests/test_handler.py", content="def test_ok():\n    assert True\n"),
+        )
+    )
+    artifact, digest = _publish_artifact(
+        artifact_root=runtime.plugin_artifact_root,
+        project="demo",
+        route_id=RouteRuntime.route_id_for("/demo/run", "POST"),
+        version=1,
+        plugin=plugin,
+    )
+    runtime.create_plugin(
+        "/demo/run",
+        "POST",
+        artifact_path=artifact,
+        artifact_digest=digest,
+        project="demo",
+    )
+    app = build_app(
+        settings=settings,
+        generator=FakeFeatureGenerator(),
+        runtime=runtime,
+        handler_executor=InlineHandlerExecutor(),
+        plugin_executor=PluginProcessExecutor(timeout_seconds=2),
+        async_route_creation=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/demo/run", json={"name": "Ada"})
+
+    assert response.status_code == 200
+    assert api_data(response) == {"name": "Ada"}
+
+
+def _generated_plugin(value: str) -> GeneratedPlugin:
+    return GeneratedPlugin(
+        description=f"Return {value}",
+        files=(
+            PluginFile(
+                path="handler.py",
+                content=f"def handle(request):\n    return {{'value': {value!r}}}\n",
+            ),
+            PluginFile(
+                path="tests/test_handler.py",
+                content=(
+                    "from handler import handle\n\n"
+                    f"def test_handler():\n    assert handle({{}}) == {{'value': {value!r}}}\n"
+                ),
+            ),
+        ),
+    )
+
+
+def test_management_api_creates_and_updates_complete_plugin_route(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    plugin_generator = FakePluginGenerator(
+        _generated_plugin("v1"),
+        _generated_plugin("v2"),
+    )
+    app = build_app(
+        settings=settings,
+        generator=FakeFeatureGenerator(),
+        plugin_generator=plugin_generator,
+        handler_executor=InlineHandlerExecutor(),
+    )
+
+    def wait_for_finish(client: TestClient, operation_url: str) -> dict[str, object]:
+        for _ in range(300):
+            operation = client.get(operation_url, headers=management_headers())
+            data = api_data(operation)
+            assert isinstance(data, dict)
+            if data["status"] == "finish":
+                return data
+            if data["status"] == "failed":
+                raise AssertionError(f"plugin operation failed: {data['last_error']}")
+            time.sleep(0.01)
+        raise AssertionError("plugin operation did not finish")
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/api/v1/manage/routes",
+            headers=management_headers(),
+            json={
+                "path": "/run",
+                "method": "POST",
+                "project": "demo",
+                "execution_mode": "plugin",
+                "instruction": "Return version one",
+            },
+        )
+        assert accepted.status_code == 202
+        receipt = api_data(accepted)
+        assert receipt["execution_mode"] == "plugin"
+        first_operation = wait_for_finish(client, receipt["operation_url"])
+        assert first_operation["execution_mode"] == "plugin"
+        first = client.post("/demo/run", json={})
+        assert api_data(first) == {"value": "v1"}
+
+        revised = client.post(
+            f"/api/v1/manage/requirements/{receipt['requirement_id']}"
+            "/revise-and-implement",
+            headers=management_headers(),
+            json={
+                "title": "demo: POST /run",
+                "instruction": "Return version two",
+            },
+        )
+        assert revised.status_code == 202
+        revised_receipt = api_data(revised)
+        assert revised_receipt["execution_mode"] == "plugin"
+        wait_for_finish(client, revised_receipt["operation_url"])
+        second = client.post("/demo/run", json={})
+        assert api_data(second) == {"value": "v2"}
+
+        routes = api_data(
+            client.get("/api/v1/manage/routes?project=demo", headers=management_headers())
+        )
+        assert routes[0]["execution_mode"] == "plugin"
+        assert routes[0]["artifact_digest"]
+
+        rolled_back = client.post(
+            f"/api/v1/manage/routes/{routes[0]['route_id']}/rollback",
+            headers=management_headers(),
+            json={"target_version": 1, "expected_version": 2},
+        )
+        assert rolled_back.status_code == 200
+        rolled_back_route = api_data(rolled_back)
+        assert rolled_back_route["version"] == 3
+        assert rolled_back_route["execution_mode"] == "plugin"
+        after_rollback = client.post("/demo/run", json={})
+        assert api_data(after_rollback) == {"value": "v1"}
+
+    assert plugin_generator.calls[0]["current_plugin"] is None
+    assert isinstance(plugin_generator.calls[1]["current_plugin"], GeneratedPlugin)
 
 
 def assert_api_error(response: httpx.Response, message: str) -> None:
@@ -310,6 +492,8 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
         "project": "default",
         "version": 1,
         "description": "Say hello",
+        "execution_mode": "restricted",
+        "artifact_digest": None,
     }
     assert client.get("/default/hello").json() == {
         "code": 0,
@@ -365,6 +549,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
                     headers=management_headers(),
                 )
                 if api_data(completed)["status"] == "finish":
+                    await asyncio.sleep(0)
                     return accepted, completed
                 await asyncio.sleep(0.01)
         raise AssertionError("background route task did not complete")
@@ -379,6 +564,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
         "project": "demo",
         "path": "/demo/hello",
         "method": "GET",
+        "execution_mode": "restricted",
         "operation_url": f"/api/v1/manage/operations/{api_data(completed)['id']}",
     }
     assert receipt["requirement_id"] != receipt["operation_id"]
@@ -807,10 +993,12 @@ def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
             "path": "/store/orders",
             "method": "GET",
             "project": "store",
-            "version": 1,
-            "description": "",
-        }
-    ]
+                "version": 1,
+                "description": "",
+                "execution_mode": "restricted",
+                "artifact_digest": None,
+            }
+        ]
 
 
 def test_all_projects_publish_below_their_project_prefix(tmp_path: Path) -> None:

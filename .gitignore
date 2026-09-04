@@ -29,6 +29,7 @@ htmlcov/
 logs/
 cicd-logs/
 cicd_case/logs/
+.planning/debug/
 
 generated/*
 !generated/.gitkeep
