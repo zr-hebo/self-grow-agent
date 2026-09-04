@@ -61,6 +61,7 @@ def _client(
     script: Path,
     *script_args: str,
     timeout_seconds: float = 2,
+    max_event_stream_bytes: int = 64 * 1024 * 1024,
 ) -> PiRpcClient:
     return PiRpcClient(
         command=(sys.executable, str(script), *script_args),
@@ -69,6 +70,7 @@ def _client(
         api_key=API_KEY,
         provider_env_name="DEEPSEEK_API_KEY",
         timeout_seconds=timeout_seconds,
+        max_event_stream_bytes=max_event_stream_bytes,
         workspace_root=tmp_path / "rpc-workspaces",
     )
 
@@ -228,6 +230,72 @@ def test_discards_high_frequency_streaming_events_without_rejecting_run(
     assert "event_count=10053" in logs
     assert "retained_event_count=3" in logs
     assert "streaming_event_count=10050" in logs
+
+
+def test_accepts_valid_stream_larger_than_legacy_eight_megabyte_limit(
+    tmp_path: Path,
+) -> None:
+    script = _write_rpc_script(
+        tmp_path,
+        """
+        emit({"type": "response", "id": prompt["id"], "command": "prompt", "success": True})
+        for _index in range(90):
+            emit({
+                "type": "message_update",
+                "assistantMessageEvent": {
+                    "type": "thinking_delta",
+                    "contentIndex": 0,
+                    "delta": "x" * 100_000,
+                },
+            })
+        emit({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "stopReason": "stop",
+            },
+        })
+        emit({"type": "agent_settled"})
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+
+    result = asyncio.run(
+        _client(tmp_path, script, timeout_seconds=10).run("Implement the handler")
+    )
+
+    assert result.final_text == "done"
+    assert all(event["type"] != "message_update" for event in result.events)
+
+
+def test_rejects_stream_larger_than_configured_transport_limit(tmp_path: Path) -> None:
+    script = _write_rpc_script(
+        tmp_path,
+        """
+        emit({"type": "response", "id": prompt["id"], "command": "prompt", "success": True})
+        emit({
+            "type": "message_update",
+            "assistantMessageEvent": {
+                "type": "thinking_delta",
+                "contentIndex": 0,
+                "delta": "x" * 1_000,
+            },
+        })
+        for _line in sys.stdin.buffer:
+            pass
+        """,
+    )
+
+    with pytest.raises(PiRpcProtocolError, match="event stream is too large"):
+        asyncio.run(
+            _client(
+                tmp_path,
+                script,
+                max_event_stream_bytes=512,
+            ).run("Implement the handler")
+        )
 
 
 def test_rejects_excessive_non_streaming_events(tmp_path: Path) -> None:
@@ -512,6 +580,24 @@ def test_reports_missing_executable_without_exposing_command(tmp_path: Path) -> 
         asyncio.run(client.run("Implement the handler"))
 
     assert API_KEY not in str(raised.value)
+
+
+@pytest.mark.parametrize("max_event_stream_bytes", [0, True, 1.5])
+def test_rejects_invalid_event_stream_limit(
+    tmp_path: Path,
+    max_event_stream_bytes: object,
+) -> None:
+    with pytest.raises(ValueError, match="max_event_stream_bytes"):
+        PiRpcClient(
+            command=("pi",),
+            provider="deepseek",
+            model="deepseek-chat",
+            api_key=API_KEY,
+            provider_env_name="DEEPSEEK_API_KEY",
+            timeout_seconds=1,
+            max_event_stream_bytes=max_event_stream_bytes,  # type: ignore[arg-type]
+            workspace_root=tmp_path,
+        )
 
 
 @pytest.mark.parametrize(

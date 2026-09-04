@@ -41,6 +41,7 @@ def test_runtime_configuration_log_context_has_effective_limits_without_key() ->
         pi_provider="deepseek",
         pi_model="deepseek-v4-pro",
         pi_timeout_seconds=321.0,
+        pi_max_event_stream_bytes=33_554_432,
         pi_max_concurrent_runs=2,
     )
 
@@ -51,6 +52,7 @@ def test_runtime_configuration_log_context_has_effective_limits_without_key() ->
     assert "pi_provider='deepseek'" in context
     assert "pi_model='deepseek-v4-pro'" in context
     assert "pi_timeout_seconds=321.000" in context
+    assert "pi_max_event_stream_bytes=33554432" in context
     assert "pi_max_concurrent_runs=2" in context
     assert "handler_timeout_seconds=" in context
     assert "max_concurrent_handlers=" in context

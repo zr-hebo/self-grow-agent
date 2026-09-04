@@ -59,6 +59,10 @@ class HandlerTimeoutError(HandlerProcessError):
     """A generated handler subprocess exceeded its wall-clock deadline."""
 
 
+class _HandlerCpuLimitExceeded(BaseException):
+    """Interrupt generated code at the soft CPU limit before the hard kill."""
+
+
 class ProcessHandlerExecutor:
     """Execute one generated handler in a fresh subprocess.
 
@@ -134,6 +138,7 @@ class ProcessHandlerExecutor:
             ),
             daemon=True,
         )
+        started_at = time.monotonic()
         deadline = time.monotonic() + self._timeout_seconds
         started = False
         failure_stage: str | None = None
@@ -196,7 +201,8 @@ class ProcessHandlerExecutor:
                     "generated_handler_process failed stage=%s pid=%s "
                     "observed_exit_code=%s observed_signal=%s "
                     "cleanup_action=%s final_exit_code=%s final_signal=%s "
-                    "error_type=%s",
+                    "error_type=%s timeout_seconds=%.3f memory_limit_bytes=%s "
+                    "cpu_limit_seconds=%s elapsed_seconds=%.3f",
                     failure_stage,
                     cleanup.process_id,
                     cleanup.observed_exit_code,
@@ -205,6 +211,10 @@ class ProcessHandlerExecutor:
                     cleanup.final_exit_code,
                     _exit_signal_name(cleanup.final_exit_code),
                     failure_error_type,
+                    self._timeout_seconds,
+                    self._memory_limit_bytes,
+                    self._cpu_limit_seconds,
+                    time.monotonic() - started_at,
                 )
 
 
@@ -260,6 +270,8 @@ def _process_main(
 def _safe_worker_error_message(exc: BaseException) -> str:
     """Return a non-secret, specific category for a worker exception."""
 
+    if isinstance(exc, _HandlerCpuLimitExceeded):
+        return "generated handler exceeded CPU limit"
     if isinstance(exc, HandlerExecutionError):
         return str(exc)
     return f"generated handler raised {type(exc).__name__}"
@@ -282,7 +294,12 @@ def _apply_resource_limits(
             _lower_resource_limit(resource, memory_resource, memory_limit_bytes)
 
     if cpu_limit_seconds is not None and hasattr(resource, "RLIMIT_CPU"):
-        _lower_resource_limit(resource, resource.RLIMIT_CPU, cpu_limit_seconds)
+        _install_cpu_limit_handler()
+        _lower_cpu_resource_limit(
+            resource,
+            resource.RLIMIT_CPU,
+            cpu_limit_seconds,
+        )
 
 
 def _lower_resource_limit(resource_module: Any, resource_id: int, limit: int) -> None:
@@ -300,6 +317,57 @@ def _lower_resource_limit(resource_module: Any, resource_id: int, limit: int) ->
         # Platforms differ in which limits they support and permit. The external
         # wall-clock timeout remains mandatory even when a kernel limit is not.
         pass
+
+
+def _lower_cpu_resource_limit(
+    resource_module: Any,
+    resource_id: int,
+    budget_seconds: int,
+) -> None:
+    """Apply a CPU budget relative to work already spent during spawn/import."""
+
+    try:
+        usage = resource_module.getrusage(resource_module.RUSAGE_SELF)
+        consumed_seconds = max(0.0, float(usage.ru_utime) + float(usage.ru_stime))
+        requested_soft = math.ceil(consumed_seconds) + budget_seconds
+        requested_hard = requested_soft + 1
+        current_soft, current_hard = resource_module.getrlimit(resource_id)
+        infinity = resource_module.RLIM_INFINITY
+
+        soft_candidates = [requested_soft]
+        if current_soft != infinity:
+            soft_candidates.append(current_soft)
+        if current_hard != infinity:
+            soft_candidates.append(current_hard)
+        effective_soft = min(soft_candidates)
+
+        hard_candidates = [requested_hard]
+        if current_hard != infinity:
+            hard_candidates.append(current_hard)
+        effective_hard = max(effective_soft, min(hard_candidates))
+        resource_module.setrlimit(
+            resource_id,
+            (effective_soft, effective_hard),
+        )
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError):
+        # The wall-clock timeout remains mandatory when CPU accounting is not
+        # supported. Never fail a request merely because a platform cannot set it.
+        pass
+
+
+def _install_cpu_limit_handler() -> None:
+    sigxcpu = getattr(signal, "SIGXCPU", None)
+    if sigxcpu is None:
+        return
+    try:
+        signal.signal(sigxcpu, _raise_cpu_limit_exceeded)
+    except (OSError, ValueError):
+        pass
+
+
+def _raise_cpu_limit_exceeded(signum: int, frame: object) -> None:
+    del signum, frame
+    raise _HandlerCpuLimitExceeded
 
 
 def _exit_signal_name(exit_code: int | None) -> str | None:

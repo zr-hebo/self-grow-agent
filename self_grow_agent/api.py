@@ -493,6 +493,7 @@ def _build_generator(settings: Settings) -> FeatureGenerator | None:
             api_key=settings.llm_api_key,
             provider_env_name=settings.pi_provider_env_name,
             timeout_seconds=settings.pi_timeout_seconds,
+            max_event_stream_bytes=settings.pi_max_event_stream_bytes,
             workspace_root=settings.pi_workspace_root,
         )
         return PiFeatureGenerator(

@@ -23,6 +23,7 @@ def _settings(tmp_path: Path) -> Settings:
         pi_provider="deepseek",
         pi_model="deepseek-v4-pro",
         pi_timeout_seconds=241,
+        pi_max_event_stream_bytes=33_554_432,
         pi_max_concurrent_runs=2,
         pi_admission_timeout_seconds=0.75,
         pi_workspace_root=tmp_path / "pi-workspaces",
@@ -82,6 +83,7 @@ def test_build_generator_wires_pi_without_putting_key_in_command(
         "api_key": settings.llm_api_key,
         "provider_env_name": settings.pi_provider_env_name,
         "timeout_seconds": settings.pi_timeout_seconds,
+        "max_event_stream_bytes": settings.pi_max_event_stream_bytes,
         "workspace_root": settings.pi_workspace_root,
     }
     command = rpc_options["command"]

@@ -35,6 +35,7 @@ def _runtime_configuration_log_context(runtime_settings: Settings) -> str:
         f"pi_provider={runtime_settings.pi_provider!r} "
         f"pi_model={runtime_settings.pi_model!r} "
         f"pi_timeout_seconds={runtime_settings.pi_timeout_seconds:.3f} "
+        f"pi_max_event_stream_bytes={runtime_settings.pi_max_event_stream_bytes} "
         f"pi_max_concurrent_runs={runtime_settings.pi_max_concurrent_runs} "
         f"pi_admission_timeout_seconds={runtime_settings.pi_admission_timeout_seconds:.3f} "
         f"handler_timeout_seconds={runtime_settings.handler_timeout_seconds:.3f} "

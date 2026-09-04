@@ -186,6 +186,7 @@ export PI_EXECUTABLE='pi'
 export PI_PROVIDER='deepseek'
 export PI_MODEL='deepseek-v4-pro'
 export PI_TIMEOUT_SECONDS='600'
+export PI_MAX_EVENT_STREAM_BYTES='67108864'
 export PI_MAX_CONCURRENT_RUNS='1'
 export PI_ADMISSION_TIMEOUT_SECONDS='1'
 export PI_WORKSPACE_ROOT="$PWD/generated/pi-workspaces"
@@ -201,6 +202,8 @@ Pi 进程以以下受控方式运行：
 - 每次运行创建独立临时工作目录和独立 `PI_CODING_AGENT_DIR`，避免读取个人 `auth.json`；
 - 限制同时运行的 Pi 进程数；槽位满时仅短暂等待，超限返回 `429`；运行超时或请求取消时执行 abort 和进程清理，POSIX 系统会回收整个独立进程组；
 - 只有收到 `agent_settled` 且最终 assistant 消息正常结束，才接受生成结果。
+
+Pi 的 `message_update` 等高频流式增量会被逐条校验和计数，但不会保留在内存结果中。`PI_MAX_EVENT_STREAM_BYTES` 限制单次 RPC 原始 JSONL 的累计传输量，默认 64 MiB；单条事件仍限制为 1 MiB，关键非流式事件仍最多保留 10,000 条。若模型确实需要更长输出，可在评估运行时间和带宽后提高该配置并重启服务。
 
 当前阶段有意保持原来的安全发布边界：Pi 最终仍必须返回一个受限的 `def handle(request)`，随后继续经过 JSON 解析、AST 白名单、试编译、SQLite 发布回执和原子热加载。它不会修改主仓库，也不能借此实现数据库迁移、依赖变更或跨文件 API。此类工程级变更需要后续的隔离代码快照、diff 审批和重启部署通道。
 
@@ -313,6 +316,8 @@ Agent 把 API 分为两个平面：
 `Retry-After: 1`。客户端取消请求不会提前释放仍在后台运行的处理器槽位；处理器完成、失败或超时后，槽位才会重新可用。
 
 并发请求在进入动态分发器时取得不可变路由版本快照。某个请求执行期间即使管理 API 发布了新版本，该在途请求仍安全完成旧版本；发布完成后到达的新请求使用新版本，不需要重启服务。
+
+`HANDLER_CPU_LIMIT_SECONDS` 限制生成处理器自身可使用的 CPU 时间，不会把 multiprocessing 子进程启动和服务模块导入消耗算进该预算。达到软限制时会返回 `dynamic handler failed: generated handler exceeded CPU limit`；子进程仍受额外的硬限制与 `HANDLER_TIMEOUT_SECONDS` 墙钟超时保护。
 
 ## 示例：让 Agent 自动添加 `GET /demo/hello`
 
@@ -509,7 +514,9 @@ LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和�
 | `429` | `dynamic handler capacity is full` | 同时运行的处理器达到 `MAX_CONCURRENT_HANDLERS`，且等待超过 `HANDLER_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `429` | `generation capacity is full` | Pi 进程达到 `PI_MAX_CONCURRENT_RUNS`，且等待超过 `PI_ADMISSION_TIMEOUT_SECONDS`；稍后重试。 |
 | `500` | `dynamic handler failed: generated handler raised ZeroDivisionError` 等安全摘要 | 处理器运行失败或返回值不符合 JSON 契约；会返回异常类别但不包含请求值、源码或堆栈。对于数据库、网络和子进程等受限能力，请实现受控后端能力，而不是放进动态处理器。 |
+| `500` | `dynamic handler failed: generated handler exceeded CPU limit` | 生成处理器耗尽 `HANDLER_CPU_LIMIT_SECONDS` 的 CPU 预算；简化处理逻辑，或在评估资源风险后提高该配置。 |
 | `502` | `LLM provider authentication failed`、`LLM provider request timed out`、`LLM returned invalid generated-handler JSON` 等 | 生成失败会返回不含密钥或上游正文的安全分类；据此检查 API Key、Base URL、模型、网络或模型的结构化输出能力。 |
+| `502` | `Pi RPC event stream is too large` | Pi 的累计 JSONL 输出超过 `PI_MAX_EVENT_STREAM_BYTES`；确认没有异常输出循环后，可提高该配置并重启服务，再重试失败 operation。 |
 | `503` | `LLM is not configured` | `LLM_API_KEY` 为空，或者 `.env` 没有被导入当前 shell。 |
 | `503` | `route publication failed` | `GENERATED_DIR` 无法写入或持久化失败；检查目录权限和磁盘状态。 |
 | `504` | `dynamic handler timed out` | 处理器执行超过 `HANDLER_TIMEOUT_SECONDS`；简化生成逻辑或调整限制。 |

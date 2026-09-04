@@ -32,7 +32,7 @@ _SAFE_PARENT_ENV = (
 )
 _CREDENTIAL_ENV_NAME = re.compile(r"(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|TOKEN)\Z")
 _MAX_JSONL_BYTES = 1_048_576
-_MAX_EVENT_STREAM_BYTES = 8_388_608
+_DEFAULT_MAX_EVENT_STREAM_BYTES = 67_108_864
 _MAX_RETAINED_EVENTS = 10_000
 _STREAMING_EVENT_TYPES = frozenset(
     {
@@ -143,6 +143,7 @@ class PiRpcClient:
         command: tuple[str, ...] = ("pi",),
         api_key: str = "",
         timeout_seconds: float = 120.0,
+        max_event_stream_bytes: int = _DEFAULT_MAX_EVENT_STREAM_BYTES,
     ) -> None:
         self._command = _validate_command(command)
         self._provider = _validate_cli_value(provider, "provider")
@@ -159,6 +160,13 @@ class PiRpcClient:
         ):
             raise ValueError("timeout_seconds must be a positive finite number")
         self._timeout_seconds = float(timeout_seconds)
+        if (
+            isinstance(max_event_stream_bytes, bool)
+            or not isinstance(max_event_stream_bytes, int)
+            or max_event_stream_bytes <= 0
+        ):
+            raise ValueError("max_event_stream_bytes must be a positive integer")
+        self._max_event_stream_bytes = max_event_stream_bytes
         self._workspace_root = Path(workspace_root).expanduser().resolve()
 
     async def run(self, prompt: str) -> PiRpcResult:
@@ -173,13 +181,15 @@ class PiRpcClient:
         started_at = time.monotonic()
         _logger.info(
             "pi_rpc run_queued operation_id=%s generation_id=%s run_id=%s "
-            "provider=%r model=%r timeout_seconds=%.3f prompt_chars=%s prompt_bytes=%s",
+            "provider=%r model=%r timeout_seconds=%.3f max_event_stream_bytes=%s "
+            "prompt_chars=%s prompt_bytes=%s",
             operation_id,
             generation_id,
             run_id,
             self._provider,
             self._model,
             self._timeout_seconds,
+            self._max_event_stream_bytes,
             len(prompt),
             len(prompt.encode("utf-8")),
         )
@@ -291,6 +301,7 @@ class PiRpcClient:
                     generation_id=generation_id,
                     run_id=run_id,
                     progress=progress,
+                    max_event_stream_bytes=self._max_event_stream_bytes,
                 )
                 outcome = "completed"
                 category = "success"
@@ -469,6 +480,7 @@ async def _read_result(
     generation_id: str | None,
     run_id: str,
     progress: _PiRpcProgress,
+    max_event_stream_bytes: int,
 ) -> PiRpcResult:
     events: list[dict[str, object]] = []
     acknowledged = False
@@ -483,7 +495,7 @@ async def _read_result(
         observed_event_count += 1
         progress.event_count = observed_event_count
         progress.byte_count = total_bytes
-        if total_bytes > _MAX_EVENT_STREAM_BYTES:
+        if total_bytes > max_event_stream_bytes:
             raise PiRpcProtocolError("Pi RPC event stream is too large")
 
         event_type = event.get("type")

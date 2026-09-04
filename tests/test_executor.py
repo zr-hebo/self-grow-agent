@@ -37,6 +37,16 @@ def _blocking_worker(
     return {"status": "too late"}
 
 
+def _cpu_bound_worker(
+    source: str,
+    module_name: str,
+    request: dict[str, object],
+) -> None:
+    del source, module_name, request
+    while True:
+        pass
+
+
 def _abrupt_exit_worker(
     source: str,
     module_name: str,
@@ -68,6 +78,37 @@ def _close_ipc_and_ignore_terminate(
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     connection.close()
     time.sleep(10)
+
+
+class _FakeCpuResource:
+    RLIM_INFINITY = -1
+    RUSAGE_SELF = 0
+
+    def __init__(self) -> None:
+        self.applied_limits: tuple[int, tuple[int, int]] | None = None
+
+    def getrusage(self, who: int) -> object:
+        assert who == self.RUSAGE_SELF
+        return type("Usage", (), {"ru_utime": 0.75, "ru_stime": 0.5})()
+
+    def getrlimit(self, resource_id: int) -> tuple[int, int]:
+        del resource_id
+        return self.RLIM_INFINITY, self.RLIM_INFINITY
+
+    def setrlimit(self, resource_id: int, limits: tuple[int, int]) -> None:
+        self.applied_limits = resource_id, limits
+
+
+class _CaptureConnection:
+    def __init__(self) -> None:
+        self.payload: bytes | None = None
+        self.closed = False
+
+    def send_bytes(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_executes_reloaded_handler_in_subprocess() -> None:
@@ -107,6 +148,24 @@ def test_terminates_worker_after_wall_clock_timeout() -> None:
     assert time.monotonic() - started_at < 2
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(signal, "SIGXCPU"),
+    reason="requires POSIX CPU-limit signals",
+)
+def test_reports_cpu_limit_instead_of_hard_killing_worker() -> None:
+    executor = ProcessHandlerExecutor(
+        timeout_seconds=5,
+        cpu_limit_seconds=1,
+        worker=_cpu_bound_worker,
+    )
+
+    with pytest.raises(
+        HandlerProcessError,
+        match="generated handler exceeded CPU limit",
+    ):
+        executor.execute(VALID_SOURCE, "cpu_bound_v1", {})
+
+
 def test_logs_process_stage_and_exit_code_when_worker_exits_before_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -128,6 +187,10 @@ def test_logs_process_stage_and_exit_code_when_worker_exits_before_response(
     assert "final_exit_code=7" in process_logs
     assert "final_signal=None" in process_logs
     assert "error_type=EOFError" in process_logs
+    assert "timeout_seconds=5.000" in process_logs
+    assert "memory_limit_bytes=None" in process_logs
+    assert "cpu_limit_seconds=None" in process_logs
+    assert "elapsed_seconds=" in process_logs
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX signal handling")
@@ -262,6 +325,45 @@ def test_accepts_positive_resource_configuration() -> None:
         cpu_limit_seconds=1,
         max_result_bytes=1024,
     )
+
+
+def test_cpu_limit_grants_full_budget_after_spawn_bootstrap() -> None:
+    resource = _FakeCpuResource()
+
+    executor_module._lower_cpu_resource_limit(resource, resource_id=7, budget_seconds=1)
+
+    # 1.25 seconds were already consumed by spawn/import. RLIMIT_CPU accepts
+    # integer seconds, so the soft boundary is ceil(1.25) + the 1-second budget.
+    assert resource.applied_limits == (7, (3, 4))
+
+
+def test_cpu_limit_signal_returns_specific_safe_worker_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = _CaptureConnection()
+
+    def exceed_cpu_limit(memory_limit_bytes: int | None, cpu_limit_seconds: int | None) -> None:
+        del memory_limit_bytes, cpu_limit_seconds
+        raise executor_module._HandlerCpuLimitExceeded
+
+    monkeypatch.setattr(executor_module, "_apply_resource_limits", exceed_cpu_limit)
+
+    executor_module._process_main(
+        connection,
+        _blocking_worker,
+        VALID_SOURCE,
+        "cpu_limited_v1",
+        {},
+        None,
+        1,
+        1024,
+    )
+
+    assert connection.closed is True
+    assert json.loads(connection.payload or b"") == {
+        "status": "error",
+        "message": "generated handler exceeded CPU limit",
+    }
 
 
 def test_rejects_result_larger_than_configured_json_limit() -> None:

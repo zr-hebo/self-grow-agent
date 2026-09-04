@@ -56,6 +56,7 @@ class Settings:
     pi_provider: str = "deepseek"
     pi_model: str = "deepseek-v4-pro"
     pi_timeout_seconds: float = 600.0
+    pi_max_event_stream_bytes: int = 67_108_864
     pi_max_concurrent_runs: int = 1
     pi_admission_timeout_seconds: float = 1.0
     pi_workspace_root: Path = Path("generated/pi-workspaces")
@@ -95,6 +96,7 @@ class Settings:
             "MAX_CONCURRENT_HANDLERS": self.max_concurrent_handlers,
             "HANDLER_ADMISSION_TIMEOUT_SECONDS": self.handler_admission_timeout_seconds,
             "PI_TIMEOUT_SECONDS": self.pi_timeout_seconds,
+            "PI_MAX_EVENT_STREAM_BYTES": self.pi_max_event_stream_bytes,
             "PI_MAX_CONCURRENT_RUNS": self.pi_max_concurrent_runs,
             "PI_ADMISSION_TIMEOUT_SECONDS": self.pi_admission_timeout_seconds,
         }
@@ -139,6 +141,9 @@ def load_settings() -> Settings:
         pi_provider=environ.get("PI_PROVIDER", "deepseek"),
         pi_model=environ.get("PI_MODEL", "deepseek-v4-pro"),
         pi_timeout_seconds=float(environ.get("PI_TIMEOUT_SECONDS", "600")),
+        pi_max_event_stream_bytes=int(
+            environ.get("PI_MAX_EVENT_STREAM_BYTES", "67108864")
+        ),
         pi_max_concurrent_runs=int(environ.get("PI_MAX_CONCURRENT_RUNS", "1")),
         pi_admission_timeout_seconds=float(
             environ.get("PI_ADMISSION_TIMEOUT_SECONDS", "1")

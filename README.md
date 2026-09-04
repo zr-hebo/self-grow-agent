@@ -197,6 +197,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `PI_PROVIDER` | `deepseek` | Pi 使用的模型提供方 |
 | `PI_MODEL` | `deepseek-v4-pro` | Pi 使用的模型 |
 | `PI_TIMEOUT_SECONDS` | `600` | 单次 Pi RPC 运行超时秒数 |
+| `PI_MAX_EVENT_STREAM_BYTES` | `67108864` | 单次 Pi RPC JSONL 事件流累计传输上限（64 MiB） |
 | `PI_MAX_CONCURRENT_RUNS` | `1` | 同时运行的 Pi 进程上限 |
 | `PI_ADMISSION_TIMEOUT_SECONDS` | `1` | Pi 槽位已满时，生成请求允许等待的秒数 |
 | `PI_WORKSPACE_ROOT` | `generated/pi-workspaces` | Pi 临时工作目录父路径 |
@@ -207,7 +208,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `MAX_HANDLER_RESULT_BYTES` | `1048576` | 动态处理器 JSON 响应上限 |
 | `HANDLER_TIMEOUT_SECONDS` | `2` | 生成处理器的墙钟执行上限 |
 | `HANDLER_MEMORY_LIMIT_MB` | `256` | 子进程内存上限（平台支持时） |
-| `HANDLER_CPU_LIMIT_SECONDS` | `1` | 子进程 CPU 时间上限（平台支持时） |
+| `HANDLER_CPU_LIMIT_SECONDS` | `1` | 生成处理器可使用的 CPU 时间预算，不包含子进程启动和模块导入（平台支持时） |
 | `MAX_CONCURRENT_HANDLERS` | `4` | 单服务进程同时执行的动态处理器上限 |
 | `HANDLER_ADMISSION_TIMEOUT_SECONDS` | `0.1` | 执行槽位满时允许排队的最长时间 |
 
