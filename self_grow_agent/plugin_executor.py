@@ -33,6 +33,16 @@ _RESERVED_ENVIRONMENT = frozenset(
     }
 )
 _logger = logging.getLogger("uvicorn.error")
+_MAX_PLUGIN_LOG_EVENTS = 64
+_MAX_PLUGIN_LOG_MESSAGE_CHARS = 1_024
+_PLUGIN_LOG_CREDENTIAL = re.compile(
+    r"(?P<name>(?:password|passwd|token|api[_ -]?key|secret|credential))"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)",
+    flags=re.IGNORECASE,
+)
+_SENSITIVE_FIELD = re.compile(
+    r"(?:password|passwd|token|api[_ -]?key|secret|credential)", re.IGNORECASE
+)
 
 
 class PluginProcessError(RuntimeError):
@@ -169,7 +179,12 @@ class PluginProcessExecutor:
                     _terminate_process_group(process)
                     process.communicate()
                     raise PluginTimeoutError("plugin handler timed out") from None
-                protocol_limit = max(self._max_result_bytes + 1024, 4096)
+                protocol_limit = max(
+                    self._max_result_bytes
+                    + (6 * _MAX_PLUGIN_LOG_EVENTS * _MAX_PLUGIN_LOG_MESSAGE_CHARS)
+                    + 8192,
+                    8192,
+                )
                 if len(stdout) > protocol_limit or len(stderr) > protocol_limit:
                     failure_stage = "worker_output"
                     raise PluginProcessError("plugin worker output exceeded byte limit")
@@ -187,13 +202,22 @@ class PluginProcessExecutor:
                 }:
                     failure_stage = "protocol"
                     raise PluginProcessError("plugin worker returned invalid response")
+                logs = response.get("logs")
+                if not _valid_plugin_logs(logs):
+                    failure_stage = "protocol"
+                    raise PluginProcessError("plugin worker returned invalid response")
+                _emit_plugin_logs(
+                    logs,
+                    artifact=artifact,
+                    redacted_values=_sensitive_values(request, self._allowed_environment),
+                )
                 if response["status"] == "error":
                     failure_stage = "handler"
                     message = response.get("message")
                     if not isinstance(message, str) or not message.startswith("plugin "):
                         message = "plugin worker process failed"
                     raise PluginProcessError(message)
-                if set(response) != {"status", "result"}:
+                if set(response) != {"status", "result", "logs"}:
                     failure_stage = "protocol"
                     raise PluginProcessError("plugin worker returned invalid response")
                 return response["result"]
@@ -214,6 +238,71 @@ class PluginProcessExecutor:
                         self._cpu_limit_seconds,
                         time.monotonic() - started_at,
                     )
+
+
+def _valid_plugin_logs(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) <= _MAX_PLUGIN_LOG_EVENTS
+        and all(
+            isinstance(event, dict)
+            and set(event) == {"level", "message"}
+            and event["level"] in {"INFO", "WARNING", "ERROR", "CRITICAL"}
+            and isinstance(event["message"], str)
+            and len(event["message"]) <= _MAX_PLUGIN_LOG_MESSAGE_CHARS
+            for event in value
+        )
+    )
+
+
+def _sensitive_values(
+    request: Mapping[str, Any], environment: Mapping[str, str]
+) -> frozenset[str]:
+    values = {value for value in environment.values() if value}
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if _SENSITIVE_FIELD.search(str(key)) and isinstance(nested, str) and nested:
+                    values.add(nested)
+                else:
+                    visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(request)
+    return frozenset(values)
+
+
+def _emit_plugin_logs(
+    events: list[dict[str, str]], *, artifact: Path, redacted_values: frozenset[str]
+) -> None:
+    for event in events:
+        message = event["message"]
+        for sensitive_value in redacted_values:
+            message = message.replace(sensitive_value, "<redacted>")
+        message = _PLUGIN_LOG_CREDENTIAL.sub(
+            lambda match: (
+                f"{match.group('name')}{match.group('separator')}<redacted>"
+            ),
+            message,
+        )
+        log_method = {
+            "INFO": _logger.info,
+            "WARNING": _logger.warning,
+            "ERROR": _logger.error,
+            "CRITICAL": _logger.critical,
+        }[event["level"]]
+        log_method(
+            "plugin_handler event project=%s route_id=%s artifact_version=%s "
+            "level=%s message=%r",
+            artifact.parent.parent.name,
+            artifact.parent.name,
+            artifact.name,
+            event["level"],
+            message,
+        )
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:

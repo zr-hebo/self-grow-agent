@@ -40,6 +40,8 @@ Plugin requirements:
 - Do not read process environment variables in generated code.
 - Explicit per-project runtime values, when configured, are available only as the
   mapping `request["runtime"]["environment"]`; never return credential values.
+- Use Python's standard `logging` module for requested operational step logs. Never
+  use print for logs, and never log credentials or complete sensitive payloads.
 - Do not use shell commands, subprocesses, dynamic imports, eval, exec, pickle, ctypes,
   or direct filesystem access.
 - For an update, return the complete replacement bundle, not a patch.

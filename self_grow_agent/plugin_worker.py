@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import logging
 import sys
 import uuid
 from pathlib import Path
@@ -12,6 +13,33 @@ from typing import Any
 
 from self_grow_agent.executor import _apply_resource_limits
 from self_grow_agent.plugin_runtime import verify_plugin_artifact
+
+_MAX_LOG_EVENTS = 64
+_MAX_LOG_MESSAGE_CHARS = 1_024
+
+
+class _ProtocolLogHandler(logging.Handler):
+    """Collect bounded plugin logs without writing on the JSON protocol streams."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.events: list[dict[str, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if len(self.events) >= _MAX_LOG_EVENTS:
+            return
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = "plugin log message could not be formatted"
+        self.events.append(
+            {
+                "level": record.levelname
+                if record.levelname in {"INFO", "WARNING", "ERROR", "CRITICAL"}
+                else "INFO",
+                "message": message[:_MAX_LOG_MESSAGE_CHARS],
+            }
+        )
 
 
 class _DiscardText:
@@ -27,6 +55,7 @@ class _DiscardText:
 def main() -> int:
     protocol_output = sys.stdout.buffer
     response: dict[str, Any]
+    log_handler = _ProtocolLogHandler()
     try:
         artifact, digest, memory_text, cpu_text, result_limit_text = sys.argv[1:6]
         memory_limit = int(memory_text) or None
@@ -40,8 +69,17 @@ def main() -> int:
         with contextlib.redirect_stdout(_DiscardText()), contextlib.redirect_stderr(
             _DiscardText()
         ):
-            handler = _load_handler(Path(artifact))
-            result = handler(request)
+            root_logger = logging.getLogger()
+            previous_handlers = root_logger.handlers[:]
+            previous_level = root_logger.level
+            root_logger.handlers = [log_handler]
+            root_logger.setLevel(logging.INFO)
+            try:
+                handler = _load_handler(Path(artifact))
+                result = handler(request)
+            finally:
+                root_logger.handlers = previous_handlers
+                root_logger.setLevel(previous_level)
         encoded_result = json.dumps(
             result,
             allow_nan=False,
@@ -52,11 +90,16 @@ def main() -> int:
             response = {
                 "status": "error",
                 "message": "plugin handler result exceeded byte limit",
+                "logs": log_handler.events,
             }
         else:
-            response = {"status": "ok", "result": result}
+            response = {"status": "ok", "result": result, "logs": log_handler.events}
     except BaseException as exc:
-        response = {"status": "error", "message": _safe_error(exc)}
+        response = {
+            "status": "error",
+            "message": _safe_error(exc),
+            "logs": log_handler.events,
+        }
 
     try:
         protocol_output.write(

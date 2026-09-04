@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from pathlib import Path
 
@@ -120,6 +121,38 @@ def test_explicit_environment_is_available_without_importing_os(tmp_path: Path) 
     )
 
     assert result == {"configured": allowed_value}
+
+
+def test_forwards_bounded_plugin_logs_and_redacts_sensitive_values(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    environment_secret = secrets.token_urlsafe(16)
+    request_secret = secrets.token_urlsafe(16)
+    artifact, digest = _artifact(
+        tmp_path,
+        "import logging\n\n"
+        "def handle(request):\n"
+        "    logger = logging.getLogger('generated.plugin')\n"
+        "    logger.info('instance=%s password=%s request_password=%s', "
+        "'10.0.0.1:3306', request['runtime']['environment']['MYSQL_PASSWORD'], "
+        "request['body']['password'])\n"
+        "    return {'ok': True}\n",
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    result = _executor(
+        allowed_environment={"MYSQL_PASSWORD": environment_secret}
+    ).execute(artifact, digest, {"body": {"password": request_secret}})
+
+    assert result == {"ok": True}
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "plugin_handler event" in logs
+    assert "route_id=post-demo-run" in logs
+    assert "instance=10.0.0.1:3306" in logs
+    assert environment_secret not in logs
+    assert request_secret not in logs
+    assert "<redacted>" in logs
 
 
 def test_rejects_tampered_artifact_before_execution(tmp_path: Path) -> None:

@@ -118,6 +118,8 @@ def test_plugin_lifecycle(tmp_path: Path) -> None:
         assert "plugin_publication validation_started" in service_log
         assert "plugin_publication tests_completed" in service_log
         assert "plugin_publication activated" in service_log
+        assert "plugin_handler event project=cicd" in service_log
+        assert "step=handle value=plugin-v2" in service_log
         assert not plugin_workspace.exists() or not list(plugin_workspace.iterdir())
     finally:
         stack.close()

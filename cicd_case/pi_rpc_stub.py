@@ -81,7 +81,9 @@ def main() -> int:
                         {
                             "path": "handler.py",
                             "content": (
+                                "import logging\n\n"
                                 "def handle(request):\n"
+                                f"    logging.getLogger('cicd.plugin').info('step=handle value={value}')\n"
                                 f"    return {{'value': {value!r}}}\n"
                             ),
                         },
