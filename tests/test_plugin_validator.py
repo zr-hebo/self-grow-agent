@@ -31,6 +31,17 @@ def test_accepts_declared_dependency_and_standard_library_imports() -> None:
     assert result.imported_modules == ("json", "pymysql")
 
 
+def test_accepts_mysql_connector_distribution_import_root() -> None:
+    plugin = _plugin(
+        "import mysql.connector\n\ndef handle(request):\n    return {'ok': True}\n",
+        dependencies=("mysql-connector-python==26.7.0",),
+    )
+
+    result = _validator("mysql-connector-python==26.7.0").validate(plugin)
+
+    assert result.imported_modules == ("mysql",)
+
+
 @pytest.mark.parametrize(
     ("handler", "message"),
     [

@@ -28,6 +28,9 @@ _FORBIDDEN_CALLS = frozenset({"__import__", "compile", "eval", "exec", "open"})
 _CREDENTIAL_NAME = re.compile(
     r"(?:^|_)(?:api_?key|password|passwd|secret|token|cookie)(?:$|_)", re.IGNORECASE
 )
+_DISTRIBUTION_IMPORT_ROOTS = {
+    "mysql-connector-python": frozenset({"mysql"}),
+}
 
 
 class PluginValidationError(ValueError):
@@ -131,7 +134,12 @@ def _declared_import_roots(dependencies: tuple[str, ...]) -> frozenset[str]:
     roots = set()
     for dependency in dependencies:
         name = dependency.partition("==")[0]
-        roots.add(re.sub(r"[-.]+", "_", name))
+        roots.update(
+            _DISTRIBUTION_IMPORT_ROOTS.get(
+                name,
+                frozenset({re.sub(r"[-.]+", "_", name)}),
+            )
+        )
     return frozenset(roots)
 
 

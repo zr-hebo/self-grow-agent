@@ -478,15 +478,27 @@ async function implementRequirement() {
       return;
     }
     const requirementId = state.selectedRequirementId;
-    showMessage("生成后端正在处理需求，完成后会自动校验并热加载。", "success");
-    const implemented = await managementRequest(
-      `/api/v1/manage/requirements/${encodeURIComponent(requirementId)}/implement`,
-      {method: "POST"},
+    const accepted = await managementRequest(
+      `/api/v1/manage/requirements/${encodeURIComponent(requirementId)}/revise-and-implement`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: saved.title,
+          instruction: saved.instruction,
+          execution_mode: saved.execution_mode,
+        }),
+      },
     );
+    showMessage(`任务 ${accepted.operation_id} 已接收，正在后台生成和校验。`, "success");
+    const operation = await waitForOperation(accepted.operation_url);
     await refreshData();
-    await selectRequirement(implemented.id);
+    const implemented = state.requirements.find((item) => item.id === requirementId);
+    if (!implemented) {
+      throw new Error("实现完成，但需求状态无法读取");
+    }
+    await selectRequirement(requirementId);
     showMessage(
-      `已发布 [${implemented.project}] ${implemented.method} ${implemented.path} · v${implemented.route_version}`,
+      `任务 ${operation.id} 已发布 [${implemented.project}] ${implemented.method} ${implemented.path} · v${implemented.route_version}`,
       "success",
     );
     showToast("功能已生成并热加载，可以立即调用业务 API。");
@@ -500,6 +512,34 @@ async function implementRequirement() {
   } finally {
     setBusy(false);
   }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForOperation(operationUrl) {
+  const deadline = Date.now() + 660000;
+  let refreshAt = 0;
+  while (Date.now() < deadline) {
+    const operation = await managementRequest(operationUrl);
+    if (operation.status === "finish") {
+      return operation;
+    }
+    if (operation.status === "failed") {
+      throw new Error(operation.last_error || "功能生成失败");
+    }
+    if (Date.now() >= refreshAt) {
+      await refreshData();
+      showMessage(
+        `任务 ${operation.id} 状态：${operation.status}。生成、测试和发布日志请查看服务终端。`,
+        "success",
+      );
+      refreshAt = Date.now() + 2000;
+    }
+    await delay(750);
+  }
+  throw new Error("后台任务仍在执行，请稍后刷新查看 operation 状态");
 }
 
 async function rebaseRequirement() {

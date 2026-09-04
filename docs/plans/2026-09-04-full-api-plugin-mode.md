@@ -28,7 +28,7 @@ The accepted LLM payload is:
 {
   "description": "Restart replication for one validated instance",
   "entrypoint": "handler:handle",
-  "dependencies": ["pymysql==1.1.1"],
+  "dependencies": ["mysql-connector-python==26.7.0"],
   "files": [
     {"path": "handler.py", "content": "def handle(request): ..."},
     {"path": "tests/test_handler.py", "content": "def test_handler(): ..."}
@@ -113,7 +113,7 @@ Add settings:
 ```text
 PLUGIN_WORKSPACE_ROOT=/var/lib/self-grow-agent/workspaces
 PLUGIN_ARTIFACT_ROOT=generated/plugins
-PLUGIN_ALLOWED_DEPENDENCIES=pymysql==1.1.1
+PLUGIN_ALLOWED_DEPENDENCIES=mysql-connector-python==26.7.0
 PLUGIN_MAX_FILES=32
 PLUGIN_MAX_FILE_BYTES=262144
 PLUGIN_MAX_TOTAL_BYTES=1048576

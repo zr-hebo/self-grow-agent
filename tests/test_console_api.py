@@ -215,6 +215,8 @@ def test_console_and_static_assets_are_public_but_do_not_expose_keys(
     assert "/console/assets/app.js" in console.text
     assert "/console/assets/styles.css" in console.text
     assert 'id="route-project"' in console.text
+    assert "revise-and-implement" in javascript.text
+    assert "operation_url" in javascript.text
     assert "route-project-heading" in javascript.text
 
     csp = console.headers["content-security-policy"]

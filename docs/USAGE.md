@@ -269,7 +269,7 @@ curl -sS 'http://127.0.0.1:8000/healthz'
 SQLite、浏览器存储或日志；刷新页面后需要重新输入。所有需求和实现接口仍由
 `X-Management-Key` 保护，因此 `/console` 本身可打开并不代表管理数据可匿名读取。
 
-典型流程是：输入需求名称、项目分组、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。对外状态会依次变为 `draft`、`implementing`、`finish`；`finish` 表示生成、校验和热加载已完成，已发布路由可继续调用。失败时记录安全的错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本和项目的需求，成功后版本自动递增。
+典型流程是：输入需求名称、项目分组、HTTP 方法、业务路径和实现描述，点击“保存草稿”，再点击“生成并热加载”。控制台通过 `revise-and-implement` 快速取得独立 `operation_id`，随后轮询 `operation_url` 并定期刷新 SQLite 时间线，不会让一次 HTTP 管理请求等待完整 LLM/Pi 生成过程。对外状态会依次变为 `draft`、`implementing`、`finish`；`finish` 表示生成、校验和热加载已完成，已发布路由可继续调用。失败时显示 operation 的安全错误摘要并允许编辑后重试。已发布路由上的“继续开发”会创建关联当前版本和项目的需求，成功后版本自动递增。
 
 如果同一路由后来通过其他需求或管理 API 升级，控制台会同时显示“当前版本”和“需求基线”，并出现“同步最新版本”按钮。这个 rebase 必须由用户显式确认，避免静默覆盖其他更新；同步后再生成会基于最新源码继续开发。
 
@@ -489,10 +489,10 @@ curl -sS "$AGENT_URL/demo/hello"
 export GENERATION_BACKEND=pi
 export PLUGIN_WORKSPACE_ROOT=/var/lib/self-grow-agent/workspaces
 export PLUGIN_ARTIFACT_ROOT="$PWD/generated/plugins"
-export PLUGIN_ALLOWED_DEPENDENCIES='PyMySQL==1.1.1'
+export PLUGIN_ALLOWED_DEPENDENCIES='mysql-connector-python==26.7.0'
 
 # 依赖由部署环境预装；生成过程不会访问包仓库。
-uv add 'PyMySQL==1.1.1'
+uv add 'mysql-connector-python==26.7.0'
 
 curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   -H 'Content-Type: application/json' \
@@ -502,7 +502,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "method":"POST",
     "project":"binlog-server",
     "execution_mode":"plugin",
-    "instruction":"从 JSON body.raw-message 提取 Instance ip:port；使用 PyMySQL 连接并依次执行 stop slave 和 start slave；失败最多重试 2 次；返回每一步的安全结果并提供单元测试。凭据只能读取 request.runtime.environment 中的 MYSQL_USER 和 MYSQL_PASSWORD，不能返回凭据值。"
+    "instruction":"从 JSON body.raw-message 提取 Instance ip:port；使用官方 mysql-connector-python（import mysql.connector）连接并依次执行 stop slave 和 start slave；失败最多重试 2 次；返回每一步的安全结果并提供单元测试。凭据只能读取 request.runtime.environment 中的 MYSQL_USER 和 MYSQL_PASSWORD，不能返回凭据值。"
   }'
 ```
 
