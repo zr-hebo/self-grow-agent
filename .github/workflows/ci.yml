@@ -86,3 +86,39 @@ jobs:
           path: cicd-logs/run_tests.log
           if-no-files-found: error
           retention-days: 7
+
+  infrastructure-integration:
+    name: Container and real MySQL cases
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.9.26"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Sync locked dependencies
+        run: uv sync --python 3.12 --frozen --dev
+
+      - name: Run container and real MySQL cases
+        run: make cicd-infra
+
+      - name: Upload infrastructure integration logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cicd-infrastructure-logs
+          path: cicd-logs/run_tests.log
+          if-no-files-found: error
+          retention-days: 7

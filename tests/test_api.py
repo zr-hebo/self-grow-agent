@@ -21,7 +21,7 @@ from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.observability import current_operation_id
-from self_grow_agent.plugin_executor import PluginProcessExecutor
+from self_grow_agent.plugin_executor import ContainerPluginExecutor, PluginProcessExecutor
 from self_grow_agent.plugin_models import GeneratedPlugin, PluginFile
 from self_grow_agent.plugin_runtime import _publish_artifact
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
@@ -305,6 +305,26 @@ def test_plugin_route_dispatches_through_immutable_artifact(tmp_path: Path) -> N
     assert api_data(response) == {"name": "Ada"}
 
 
+def test_app_selects_container_plugin_executor_from_settings(tmp_path: Path) -> None:
+    settings = replace(
+        make_settings(tmp_path),
+        plugin_execution_backend="container",
+        plugin_container_runtime="docker",
+        plugin_container_image="plugin-runtime:test",
+        plugin_project_container_networks=("default:private-agent",),
+    )
+
+    app = build_app(
+        settings=settings,
+        generator=FakeFeatureGenerator(),
+        handler_executor=InlineHandlerExecutor(),
+        async_route_creation=False,
+    )
+
+    assert isinstance(app.state.plugin_executor, ContainerPluginExecutor)
+    assert app.state.plugin_executor._network == "private-agent"
+
+
 def _generated_plugin(value: str) -> GeneratedPlugin:
     return GeneratedPlugin(
         description=f"Return {value}",
@@ -574,8 +594,15 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
         "get-h-demo-hello-234746bf43d57d53"
     )
 
-    task_logs = "\n".join(record.getMessage() for record in caplog.records)
     operation_id = api_data(completed)["id"]
+    deadline = time.monotonic() + 1
+    while time.monotonic() < deadline:
+        task_logs = "\n".join(record.getMessage() for record in caplog.records)
+        if "from_status=implementing to_status=finish" in task_logs:
+            break
+        time.sleep(0.01)
+    else:
+        task_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert f"route_task state_transition operation_id={operation_id}" in task_logs
     assert "from_status=none to_status=accepted" in task_logs
     assert "from_status=accepted to_status=implementing" in task_logs

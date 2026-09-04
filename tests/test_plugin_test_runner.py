@@ -45,6 +45,26 @@ def test_handler():
     assert result.output_bytes < 16_384
 
 
+def test_generated_tests_can_import_controlled_platform_capability(tmp_path: Path) -> None:
+    source = _write_plugin(
+        tmp_path,
+        "from handler import handle\n\n"
+        "def test_handler_imports_capability():\n"
+        "    assert handle({'body': {'instance': 'bad'}})['ok'] is False\n",
+    )
+    (source / "handler.py").write_text(
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    return rebuild_replication(request['body']['instance'])\n",
+        encoding="utf-8",
+    )
+
+    result = PluginTestRunner(timeout_seconds=5, max_output_bytes=16_384).run(source)
+
+    assert result.passed is True
+
+
 def test_reports_test_failure_without_returning_test_output(tmp_path: Path) -> None:
     source = _write_plugin(tmp_path, "def test_bad():\n    assert False\n")
 

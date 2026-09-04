@@ -31,6 +31,9 @@ _RESERVED_PI_PROVIDER_ENV_NAMES = frozenset(
     }
 )
 _PLUGIN_ENV_ENTRY = re.compile(r"([a-z][a-z0-9-]{0,62}):([A-Z][A-Z0-9_]*)\Z")
+_PLUGIN_NETWORK_ENTRY = re.compile(
+    r"([a-z][a-z0-9-]{0,62}):([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\Z"
+)
 _RESERVED_PLUGIN_ENV_NAMES = frozenset(
     {
         "MANAGEMENT_API_KEY",
@@ -83,6 +86,10 @@ class Settings:
     plugin_max_file_bytes: int = 262_144
     plugin_max_total_bytes: int = 1_048_576
     plugin_keep_failed_workspaces: bool = True
+    plugin_execution_backend: str = "process"
+    plugin_container_runtime: str = "docker"
+    plugin_container_image: str = "self-grow-agent-plugin-runtime:latest"
+    plugin_project_container_networks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.host:
@@ -130,6 +137,20 @@ class Settings:
                 raise ValueError(f"{name} must be positive")
         if not isinstance(self.plugin_keep_failed_workspaces, bool):
             raise ValueError("PLUGIN_KEEP_FAILED_WORKSPACES must be a boolean")
+        if self.plugin_execution_backend not in {"process", "container"}:
+            raise ValueError("PLUGIN_EXECUTION_BACKEND must be 'process' or 'container'")
+        if (
+            not self.plugin_container_runtime
+            or self.plugin_container_runtime != self.plugin_container_runtime.strip()
+            or "\x00" in self.plugin_container_runtime
+        ):
+            raise ValueError("PLUGIN_CONTAINER_RUNTIME must be a non-empty command")
+        if (
+            not self.plugin_container_image
+            or self.plugin_container_image != self.plugin_container_image.strip()
+            or re.search(r"\s", self.plugin_container_image)
+        ):
+            raise ValueError("PLUGIN_CONTAINER_IMAGE must be a non-empty image reference")
         generated_dir = self.generated_dir.expanduser().resolve()
         workspace_root = self.plugin_workspace_root.expanduser().resolve()
         artifact_root = self.plugin_artifact_root.expanduser().resolve()
@@ -152,6 +173,17 @@ class Settings:
             if key in seen_plugin_env:
                 raise ValueError("PLUGIN_PROJECT_ENV_ALLOWLIST contains a duplicate entry")
             seen_plugin_env.add(key)
+        seen_plugin_networks: set[str] = set()
+        for entry in self.plugin_project_container_networks:
+            match = _PLUGIN_NETWORK_ENTRY.fullmatch(entry)
+            if match is None:
+                raise ValueError("PLUGIN_PROJECT_CONTAINER_NETWORKS contains an invalid entry")
+            project = match.group(1)
+            if project in seen_plugin_networks:
+                raise ValueError(
+                    "PLUGIN_PROJECT_CONTAINER_NETWORKS contains a duplicate project"
+                )
+            seen_plugin_networks.add(project)
 
 
 def load_settings() -> Settings:
@@ -225,6 +257,16 @@ def load_settings() -> Settings:
         plugin_keep_failed_workspaces=_parse_boolean(
             "PLUGIN_KEEP_FAILED_WORKSPACES",
             environ.get("PLUGIN_KEEP_FAILED_WORKSPACES", "true"),
+        ),
+        plugin_execution_backend=environ.get("PLUGIN_EXECUTION_BACKEND", "process"),
+        plugin_container_runtime=environ.get("PLUGIN_CONTAINER_RUNTIME", "docker"),
+        plugin_container_image=environ.get(
+            "PLUGIN_CONTAINER_IMAGE", "self-grow-agent-plugin-runtime:latest"
+        ),
+        plugin_project_container_networks=tuple(
+            entry.strip()
+            for entry in environ.get("PLUGIN_PROJECT_CONTAINER_NETWORKS", "").split(",")
+            if entry.strip()
         ),
     )
 

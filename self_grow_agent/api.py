@@ -58,6 +58,8 @@ from self_grow_agent.observability import operation_log_context
 from self_grow_agent.pi_generator import PiFeatureGenerator
 from self_grow_agent.pi_rpc import PiRpcClient
 from self_grow_agent.plugin_executor import (
+    ContainerPluginExecutor,
+    PluginExecutor,
     PluginProcessError,
     PluginProcessExecutor,
     PluginTimeoutError,
@@ -725,7 +727,7 @@ def create_app(
     plugin_publisher: PluginPublisher | None = None,
     runtime: RouteRuntime | None = None,
     handler_executor: HandlerExecutor | None = None,
-    plugin_executor: PluginProcessExecutor | None = None,
+    plugin_executor: PluginExecutor | None = None,
     requirement_store: RequirementStore | None = None,
     lifespan: Any | None = None,
     async_route_creation: bool = True,
@@ -782,20 +784,32 @@ def create_app(
             plugin_environments.setdefault(project, {})[environment_name] = os.environ[
                 environment_name
             ]
-    plugin_executors: dict[str, PluginProcessExecutor] = {}
+    plugin_networks = dict(
+        entry.split(":", 1) for entry in active_settings.plugin_project_container_networks
+    )
+    plugin_executors: dict[str, PluginExecutor] = {}
 
-    def plugin_executor_for(project: str) -> PluginProcessExecutor:
+    def plugin_executor_for(project: str) -> PluginExecutor:
         if plugin_executor is not None:
             return plugin_executor
         if project not in plugin_executors:
-            plugin_executors[project] = PluginProcessExecutor(
-                timeout_seconds=active_settings.handler_timeout_seconds,
-                memory_limit_bytes=active_settings.handler_memory_limit_mb * 1024 * 1024,
-                cpu_limit_seconds=active_settings.handler_cpu_limit_seconds,
-                max_result_bytes=active_settings.max_handler_result_bytes,
-                max_request_bytes=active_settings.max_request_body_bytes,
-                allowed_environment=plugin_environments.get(project),
-            )
+            executor_options = {
+                "timeout_seconds": active_settings.handler_timeout_seconds,
+                "memory_limit_bytes": active_settings.handler_memory_limit_mb * 1024 * 1024,
+                "cpu_limit_seconds": active_settings.handler_cpu_limit_seconds,
+                "max_result_bytes": active_settings.max_handler_result_bytes,
+                "max_request_bytes": active_settings.max_request_body_bytes,
+                "allowed_environment": plugin_environments.get(project),
+            }
+            if active_settings.plugin_execution_backend == "container":
+                plugin_executors[project] = ContainerPluginExecutor(
+                    runtime=active_settings.plugin_container_runtime,
+                    image=active_settings.plugin_container_image,
+                    network=plugin_networks.get(project),
+                    **executor_options,
+                )
+            else:
+                plugin_executors[project] = PluginProcessExecutor(**executor_options)
         return plugin_executors[project]
 
     active_plugin_executor = plugin_executor_for(DEFAULT_PROJECT)

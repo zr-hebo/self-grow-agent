@@ -11,8 +11,14 @@ from self_grow_agent.plugin_models import GeneratedPlugin, PluginPolicy
 
 _FORBIDDEN_MODULES = frozenset(
     {
+        "builtins",
         "ctypes",
+        "dis",
+        "gc",
         "importlib",
+        "inspect",
+        "io",
+        "marshal",
         "multiprocessing",
         "os",
         "pathlib",
@@ -21,16 +27,67 @@ _FORBIDDEN_MODULES = frozenset(
         "shutil",
         "socket",
         "subprocess",
+        "sys",
         "tempfile",
+        "types",
     }
 )
-_FORBIDDEN_CALLS = frozenset({"__import__", "compile", "eval", "exec", "open"})
+_FORBIDDEN_CALLS = frozenset(
+    {
+        "__import__",
+        "breakpoint",
+        "compile",
+        "dir",
+        "eval",
+        "exec",
+        "getattr",
+        "globals",
+        "help",
+        "input",
+        "locals",
+        "open",
+        "setattr",
+        "vars",
+    }
+)
 _CREDENTIAL_NAME = re.compile(
     r"(?:^|_)(?:api_?key|password|passwd|secret|token|cookie)(?:$|_)", re.IGNORECASE
 )
-_DISTRIBUTION_IMPORT_ROOTS = {
-    "mysql-connector-python": frozenset({"mysql"}),
-}
+_DATABASE_DRIVER_ROOTS = frozenset(
+    {
+        "aiomysql",
+        "asyncmy",
+        "asyncpg",
+        "databases",
+        "duckdb",
+        "mysql",
+        "mysqlclient",
+        "mysqldb",
+        "psycopg",
+        "psycopg2",
+        "pymysql",
+        "pyodbc",
+        "sqlalchemy",
+        "sqlite3",
+    }
+)
+_DATABASE_DRIVER_DISTRIBUTIONS = frozenset(
+    {
+        "aiomysql",
+        "asyncmy",
+        "asyncpg",
+        "databases",
+        "duckdb",
+        "mysql-connector-python",
+        "mysqlclient",
+        "psycopg",
+        "psycopg2",
+        "pymysql",
+        "pyodbc",
+        "sqlalchemy",
+    }
+)
+_CONTROLLED_CAPABILITY_MODULE = "self_grow_agent.capabilities.mysql_replication"
 
 
 class PluginValidationError(ValueError):
@@ -56,6 +113,13 @@ class PluginValidator:
         """Validate one complete plugin without importing or executing it."""
 
         plugin = self._policy.validate(plugin)
+        if any(
+            dependency.partition("==")[0].casefold() in _DATABASE_DRIVER_DISTRIBUTIONS
+            for dependency in plugin.dependencies
+        ):
+            raise PluginValidationError(
+                "plugin database driver dependencies are forbidden; use the controlled capability"
+            )
         declared_modules = _declared_import_roots(plugin.dependencies) | _local_import_roots(
             plugin
         )
@@ -90,6 +154,7 @@ def _validate_tree(
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
+                _validate_controlled_import(alias.name, filename, from_import=False)
                 root = alias.name.partition(".")[0]
                 _validate_import(root, filename, declared_modules)
                 imports.add(root)
@@ -98,6 +163,14 @@ def _validate_tree(
                 raise PluginValidationError("plugin relative imports are not allowed")
             if not node.module:
                 raise PluginValidationError("plugin import is invalid")
+            _validate_controlled_import(node.module, filename, from_import=True)
+            if node.module == _CONTROLLED_CAPABILITY_MODULE and any(
+                alias.name != "rebuild_replication" or alias.asname is not None
+                for alias in node.names
+            ):
+                raise PluginValidationError(
+                    "plugin may import only rebuild_replication from the controlled capability"
+                )
             root = node.module.partition(".")[0]
             _validate_import(root, filename, declared_modules)
             imports.add(root)
@@ -107,6 +180,10 @@ def _validate_tree(
                 raise PluginValidationError(
                     f"plugin file {filename!r} uses forbidden call {call_name!r}"
                 )
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            raise PluginValidationError(
+                f"plugin file {filename!r} accesses a private attribute"
+            )
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             _validate_assignment_credentials(node, filename)
         elif isinstance(node, ast.Dict):
@@ -119,6 +196,16 @@ def _validate_import(
     filename: str,
     declared_modules: frozenset[str],
 ) -> None:
+    if root.startswith("_"):
+        raise PluginValidationError(
+            f"plugin file {filename!r} imports a private runtime module"
+        )
+    if root in _DATABASE_DRIVER_ROOTS:
+        raise PluginValidationError(
+            f"plugin file {filename!r} must use the controlled capability instead of a database driver"
+        )
+    if root == "self_grow_agent":
+        return
     if root in _FORBIDDEN_MODULES:
         raise PluginValidationError(
             f"plugin file {filename!r} imports forbidden module {root!r}"
@@ -130,16 +217,27 @@ def _validate_import(
     )
 
 
+def _validate_controlled_import(
+    module: str, filename: str, *, from_import: bool
+) -> None:
+    root = module.partition(".")[0]
+    if root in _DATABASE_DRIVER_ROOTS:
+        raise PluginValidationError(
+            f"plugin file {filename!r} must use the controlled capability instead of a database driver"
+        )
+    if root != "self_grow_agent":
+        return
+    if not from_import or module != _CONTROLLED_CAPABILITY_MODULE:
+        raise PluginValidationError(
+            f"plugin file {filename!r} may import only the controlled capability"
+        )
+
+
 def _declared_import_roots(dependencies: tuple[str, ...]) -> frozenset[str]:
     roots = set()
     for dependency in dependencies:
         name = dependency.partition("==")[0]
-        roots.update(
-            _DISTRIBUTION_IMPORT_ROOTS.get(
-                name,
-                frozenset({re.sub(r"[-.]+", "_", name)}),
-            )
-        )
+        roots.add(re.sub(r"[-.]+", "_", name))
     return frozenset(roots)
 
 
@@ -154,6 +252,8 @@ def _local_import_roots(plugin: GeneratedPlugin) -> frozenset[str]:
 def _call_name(function: ast.expr) -> str | None:
     if isinstance(function, ast.Name):
         return function.id
+    if isinstance(function, ast.Attribute):
+        return function.attr
     return None
 
 

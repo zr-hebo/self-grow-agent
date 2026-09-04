@@ -39,7 +39,12 @@ Plugin requirements:
 - Never embed passwords, API keys, tokens, cookies, or other credentials.
 - Do not read process environment variables in generated code.
 - Explicit per-project runtime values, when configured, are available only as the
-  mapping `request["runtime"]["environment"]`; never return credential values.
+  mapping `request["runtime"]["environment"]`; secret values are withheld.
+- For MySQL replication operations, import only
+  `rebuild_replication` from `self_grow_agent.capabilities.mysql_replication` and pass
+  it a validated `ip:port`. Do not import database drivers, declare database-driver
+  dependencies, accept SQL text, or construct SQL statements. The controlled
+  capability owns credentials, fixed statements, retries, and step logs.
 - Use Python's standard `logging` module for requested operational step logs. Never
   use print for logs, and never log credentials or complete sensitive payloads.
 - Do not use shell commands, subprocesses, dynamic imports, eval, exec, pickle, ctypes,

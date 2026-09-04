@@ -22,24 +22,88 @@ def _validator(*allowed: str) -> PluginValidator:
 
 def test_accepts_declared_dependency_and_standard_library_imports() -> None:
     plugin = _plugin(
-        "import json\nimport pymysql\n\ndef handle(request):\n    return json.loads('{}')\n",
-        dependencies=("pymysql==1.1.1",),
+        "import httpx\nimport json\n\ndef handle(request):\n    return json.loads('{}')\n",
+        dependencies=("httpx==0.28.1",),
     )
 
-    result = _validator("pymysql==1.1.1").validate(plugin)
+    result = _validator("httpx==0.28.1").validate(plugin)
 
-    assert result.imported_modules == ("json", "pymysql")
+    assert result.imported_modules == ("httpx", "json")
 
 
-def test_accepts_mysql_connector_distribution_import_root() -> None:
+def test_accepts_controlled_mysql_replication_capability() -> None:
     plugin = _plugin(
-        "import mysql.connector\n\ndef handle(request):\n    return {'ok': True}\n",
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    return rebuild_replication(request['body']['instance'])\n",
+    )
+
+    result = _validator().validate(plugin)
+
+    assert result.imported_modules == ("self_grow_agent",)
+
+
+@pytest.mark.parametrize(
+    ("handler", "dependency"),
+    [
+        (
+            "import mysql.connector\n\ndef handle(request):\n    return {}\n",
+            "mysql-connector-python==26.7.0",
+        ),
+        ("import pymysql\n\ndef handle(request):\n    return {}\n", "pymysql==1.1.1"),
+        ("import sqlite3\n\ndef handle(request):\n    return {}\n", "sqlite3==1.0.0"),
+    ],
+)
+def test_rejects_direct_database_driver_even_when_dependency_is_allowed(
+    handler: str, dependency: str
+) -> None:
+    plugin = _plugin(handler, dependencies=(dependency,))
+
+    with pytest.raises(PluginValidationError, match="controlled capability"):
+        _validator(dependency).validate(plugin)
+
+
+def test_rejects_database_driver_dependency_without_an_import() -> None:
+    plugin = _plugin(
+        "def handle(request):\n    return {}\n",
         dependencies=("mysql-connector-python==26.7.0",),
     )
 
-    result = _validator("mysql-connector-python==26.7.0").validate(plugin)
+    with pytest.raises(PluginValidationError, match="database driver dependencies"):
+        _validator("mysql-connector-python==26.7.0").validate(plugin)
 
-    assert result.imported_modules == ("mysql",)
+
+def test_rejects_broad_internal_package_import() -> None:
+    with pytest.raises(PluginValidationError, match="controlled capability"):
+        _validator().validate(
+            _plugin("import self_grow_agent\n\ndef handle(request):\n    return {}\n")
+        )
+
+
+def test_rejects_capability_function_introspection() -> None:
+    handler = (
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    return rebuild_replication.__globals__['_connect']\n"
+    )
+
+    with pytest.raises(PluginValidationError, match="private attribute"):
+        _validator().validate(_plugin(handler))
+
+
+def test_rejects_qualified_reflection_call() -> None:
+    handler = (
+        "import builtins\n"
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    return builtins.getattr(rebuild_replication, '__globals__')\n"
+    )
+
+    with pytest.raises(PluginValidationError, match="forbidden module|forbidden call"):
+        _validator().validate(_plugin(handler))
 
 
 @pytest.mark.parametrize(

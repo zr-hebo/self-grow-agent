@@ -166,6 +166,10 @@ export LLM_TIMEOUT_SECONDS='30'
 | `PLUGIN_ARTIFACT_ROOT` | `generated/plugins` | 已验证的不可变插件版本。 |
 | `PLUGIN_ALLOWED_DEPENDENCIES` | 空 | 可声明的精确依赖 pin，逗号分隔；依赖必须预装。 |
 | `PLUGIN_PROJECT_ENV_ALLOWLIST` | 空 | `project:ENV_NAME` 项列表，只注入指定项目的业务插件进程。 |
+| `PLUGIN_EXECUTION_BACKEND` | `process` | 插件执行后端：本地开发用 `process`，生产强隔离用 `container`。 |
+| `PLUGIN_CONTAINER_RUNTIME` | `docker` | OCI 容器 CLI 的名称或绝对路径。 |
+| `PLUGIN_CONTAINER_IMAGE` | `self-grow-agent-plugin-runtime:latest` | 预构建的插件运行镜像。 |
+| `PLUGIN_PROJECT_CONTAINER_NETWORKS` | 空 | `project:docker-network` 项列表；未配置的项目容器使用 `--network none`。 |
 | `PLUGIN_MAX_FILES` | `32` | 单个插件 bundle 的文件数上限。 |
 | `PLUGIN_MAX_FILE_BYTES` | `262144` | 单个插件文件的 UTF-8 字节上限。 |
 | `PLUGIN_MAX_TOTAL_BYTES` | `1048576` | 单个插件全部源码的总字节上限。 |
@@ -489,10 +493,6 @@ curl -sS "$AGENT_URL/demo/hello"
 export GENERATION_BACKEND=pi
 export PLUGIN_WORKSPACE_ROOT=/var/lib/self-grow-agent/workspaces
 export PLUGIN_ARTIFACT_ROOT="$PWD/generated/plugins"
-export PLUGIN_ALLOWED_DEPENDENCIES='mysql-connector-python==26.7.0'
-
-# 依赖由部署环境预装；生成过程不会访问包仓库。
-uv add 'mysql-connector-python==26.7.0'
 
 curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
   -H 'Content-Type: application/json' \
@@ -502,13 +502,13 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "method":"POST",
     "project":"binlog-server",
     "execution_mode":"plugin",
-    "instruction":"从 JSON body.raw-message 提取 Instance ip:port；使用官方 mysql-connector-python（import mysql.connector）连接并依次执行 stop slave 和 start slave；失败最多重试 2 次；返回每一步的安全结果并提供单元测试。凭据只能读取 request.runtime.environment 中的 MYSQL_USER 和 MYSQL_PASSWORD，不能返回凭据值。"
+    "instruction":"从 JSON body.raw-message 提取并严格校验 Instance ip:port；只调用 self_grow_agent.capabilities.mysql_replication.rebuild_replication，不要 import 数据库驱动、不要生成或接收 SQL、不要读取或返回凭据；提供提取逻辑的单元测试。"
   }'
 ```
 
 候选 bundle 先写入 `PLUGIN_WORKSPACE_ROOT/<operation_id>`，再经过路径/依赖/AST 策略检查和生成测试。只有全部通过，才会发布到 `PLUGIN_ARTIFACT_ROOT/<project>/<route-id>/vN` 并原子切换活动路由。失败候选不会替换在线版本；`PLUGIN_KEEP_FAILED_WORKSPACES=false` 会自动清理失败工作区。
 
-业务插件默认拿不到任何父进程环境变量。确需数据库凭据时，由部署系统安全注入变量，并逐项允许给指定项目：
+业务插件默认拿不到任何父进程环境变量。MySQL capability 的凭据由部署系统安全注入，并逐项允许给指定项目：
 
 ```bash
 export MYSQL_USER='visit_user'
@@ -516,7 +516,24 @@ export MYSQL_USER='visit_user'
 export PLUGIN_PROJECT_ENV_ALLOWLIST='binlog-server:MYSQL_USER,binlog-server:MYSQL_PASSWORD'
 ```
 
-`MANAGEMENT_API_KEY`、`LLM_API_KEY`、`DEEPSEEK_API_KEY`、Python loader 变量等不能加入该白名单；允许值会出现在该项目插件的 `request["runtime"]["environment"]` 中，也会注入该插件子进程环境，但不会进入生成 prompt、测试进程或 HTTP 请求日志。插件必须避免返回或自行记录这些值。可声明的第三方依赖必须同时满足：精确 `name==version`、位于 `PLUGIN_ALLOWED_DEPENDENCIES`、已经安装在运行环境中。
+`MANAGEMENT_API_KEY`、`LLM_API_KEY`、`DEEPSEEK_API_KEY`、Python loader 变量等不能加入该白名单。允许变量会注入指定项目的隔离进程，但名称包含 `password`、`token`、`api_key`、`secret` 或 `credential` 的敏感值不会复制到 `request["runtime"]["environment"]`；MySQL capability 直接从隔离进程环境消费密码。所有允许值都不会进入生成 prompt、测试进程或 HTTP 请求日志。可声明的普通第三方依赖必须同时满足：精确 `name==version`、位于 `PLUGIN_ALLOWED_DEPENDENCIES`、已经安装在运行环境中；数据库驱动依赖及其 import 即使出现在允许列表中也会被 AST 门禁拒绝，MySQL Connector 由平台 capability 独占。
+
+受控 MySQL capability 只接受 `IPv4:port`，只执行固定的 `STOP REPLICA`、`START REPLICA`，最多允许 2 次重试，并对连接、停止、启动、失败步骤和耗时记录结构化日志。它不接受 SQL 参数，也不会把驱动原始异常或密码返回给调用方。运行账号只需 MySQL 的 `REPLICATION_SLAVE_ADMIN` 动态权限；不要授予 DDL/DML 权限。
+
+### Docker 强隔离执行
+
+先构建运行镜像，再把插件后端切换为 `container`：
+
+```bash
+docker build -f docker/plugin-runtime.Dockerfile \
+  -t self-grow-agent-plugin-runtime:latest .
+
+export PLUGIN_EXECUTION_BACKEND=container
+export PLUGIN_CONTAINER_IMAGE=self-grow-agent-plugin-runtime:latest
+export PLUGIN_PROJECT_CONTAINER_NETWORKS='binlog-server:binlog-private'
+```
+
+容器执行器使用只读根文件系统和只读 artifact/平台代码挂载，`--cap-drop=ALL`、`no-new-privileges`、PID/内存/CPU/墙钟限制，并为每次调用生成独立容器。未配置 project 网络时强制 `--network none`；需要访问 MySQL 时，应创建只包含受控目标和 Agent plugin 容器的专用 Docker network，再通过 `PLUGIN_PROJECT_CONTAINER_NETWORKS` 精确映射。不要挂载 Docker socket、宿主目录或云凭据。Docker daemon 与镜像仓库仍属于可信计算基；若需要抵御内核级逃逸，应把同一执行协议部署到 microVM、Kata 或 gVisor。
 
 查看路由返回的 `artifact_digest` 可核对当前不可变制品。将插件 v1 内容回滚并重新发布为 v3（版本始终单调递增）：
 
@@ -562,9 +579,9 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes/<route-id>/rollback" \
 - 处理器只能返回 JSON 兼容值。输入体、输出结果、执行时间和并发数都受配置限制；内存和 CPU 限制会在操作系统支持时生效。
 - 只有显式白名单中的业务请求头会传给处理器；`Authorization`、Cookie、API Key 和管理密钥不会传入生成代码。
 
-LLM 输出始终应视为不可信输入。当前实现使用 AST 白名单和隔离子进程降低风险，但子进程仍使用服务进程的操作系统用户，不能替代容器、虚拟机或 seccomp 等强隔离。管理 API 应只放在可信网络或额外身份认证之后，并使用强密钥。
+LLM 输出始终应视为不可信输入。默认 `process` 后端使用 AST 门禁和隔离子进程降低风险，但仍使用服务进程的操作系统用户。生产环境应使用 `container` 后端；管理 API 仍应只放在可信网络或额外身份认证之后，并使用强密钥。
 
-`plugin` 模式放宽普通 import 和多文件限制，但不会放开 `os`、`subprocess`、`socket`、动态 import、任意文件访问、`eval`/`exec` 或硬编码凭据。它在本地仍是同用户 subprocess 隔离；生产环境应把 `PluginProcessExecutor` 替换为低权限容器/微虚拟机执行器，限制只读根文件系统、网络出口、CPU、内存和墙钟时间。
+`plugin` 模式放宽普通 import 和多文件限制，但不会放开 `os`、`subprocess`、`socket`、数据库驱动、动态 import、任意文件访问、`eval`/`exec` 或硬编码凭据。容器后端已经实现只读文件系统、默认断网和资源边界；如需更强的租户隔离，可保持 `PluginExecutor` 协议不变并替换为 microVM、Kata 或 gVisor 执行器。
 
 ## 常见错误与排查
 
@@ -605,6 +622,9 @@ make test
 
 ```bash
 make cicd
+
+# Docker 强隔离 + 真实 MySQL 8.4，不调用 LLM
+make cicd-infra
 ```
 
 只运行 Pi coding-agent 集成组：

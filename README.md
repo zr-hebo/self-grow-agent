@@ -11,7 +11,7 @@
 
 每个动态 API 都使用 `project` 作为 URL 命名空间。创建 API 或控制台需求时传入例如 `customer-portal` 的项目名和相对路径 `/orders`，公开地址即为 `/customer-portal/orders`；默认项目也显式使用 `/default` 前缀。控制台按项目显示路由，管理接口支持 `GET /api/v1/manage/routes?project=customer-portal` 和 `GET /api/v1/manage/requirements?project=customer-portal` 筛选。项目名会标准化为小写，必须以字母开头，且只能包含小写字母、数字和连字符（最长 63 个字符）。
 
-管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。直接创建路由会先在 SQLite 保存一个需求任务并返回 `202 Accepted`，LLM 在后台生成、校验和热加载；可轮询任务状态，避免管理请求长时间占用连接。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；操作系统支持时还会限制内存与 CPU。完整插件可使用标准 `logging` 输出受控步骤日志；父服务会附加项目、路由和版本信息，并对显式注入的项目环境值及常见凭据字段二次脱敏。`print` 输出不会进入服务日志。
+管理面是稳定的 FastAPI 路由，业务面由末尾的动态分发器处理。直接创建路由会先在 SQLite 保存一个需求任务并返回 `202 Accepted`，LLM 在后台生成、校验和热加载；可轮询任务状态，避免管理请求长时间占用连接。正在执行的请求继续使用旧处理器，后续请求使用新处理器；失败的更新不会影响旧版本。每次业务调用会在短生命周期子进程中重新加载当前版本，并施加超时、响应大小和并发上限；生产环境还可切换到 Docker 强隔离执行器，启用只读根文件系统、默认断网、capability drop、no-new-privileges 和资源限制。完整插件可使用标准 `logging` 输出受控步骤日志；父服务会附加项目、路由和版本信息，并对显式注入的项目环境值及常见凭据字段二次脱敏。`print` 输出不会进入服务日志。
 
 完整的 LLM 配置、启动步骤、自动创建和热更新示例，请参阅 [使用指南](docs/USAGE.md)。
 
@@ -34,6 +34,8 @@ uv run python main.py
 ```
 
 若要生成带普通 import、多文件和测试的完整 API 插件，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`，并在请求中传 `"execution_mode":"plugin"`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
+
+MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
 服务默认监听 `127.0.0.1:8000`，入口会从 `config.py` 加载 `HOST` 和 `PORT`。动态业务处理器不依赖 Uvicorn 重启。
 启动后打开 [http://127.0.0.1:8000/console](http://127.0.0.1:8000/console)，输入本次启动使用的

@@ -44,6 +44,16 @@ GROUPS = {
         "file": "test_plugin_lifecycle.py",
         "cases": ("test_plugin_lifecycle",),
     },
+    "container": {
+        "label": "Hardened container plugin execution",
+        "file": "test_container_plugin.py",
+        "cases": ("test_hardened_container_executes_published_plugin",),
+    },
+    "mysql": {
+        "label": "Controlled real MySQL replication",
+        "file": "test_mysql_replication.py",
+        "cases": ("test_container_plugin_restarts_real_mysql_replication",),
+    },
 }
 DEFAULT_GROUPS = ("health", "lifecycle", "coding_agent", "plugin")
 

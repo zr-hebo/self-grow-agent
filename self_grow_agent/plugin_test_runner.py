@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 @dataclass(frozen=True, slots=True)
 class PluginTestResult:
@@ -63,7 +65,7 @@ class PluginTestRunner:
                 "PATH": os.defpath,
                 "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONNOUSERSITE": "1",
-                "PYTHONPATH": str(source),
+                "PYTHONPATH": os.pathsep.join((str(source), str(_PROJECT_ROOT))),
                 "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
             }
             command = [

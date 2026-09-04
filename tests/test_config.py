@@ -45,6 +45,10 @@ SETTING_ENV_VARS = (
     "PLUGIN_MAX_FILE_BYTES",
     "PLUGIN_MAX_TOTAL_BYTES",
     "PLUGIN_KEEP_FAILED_WORKSPACES",
+    "PLUGIN_EXECUTION_BACKEND",
+    "PLUGIN_CONTAINER_RUNTIME",
+    "PLUGIN_CONTAINER_IMAGE",
+    "PLUGIN_PROJECT_CONTAINER_NETWORKS",
 )
 
 
@@ -89,6 +93,10 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
         "PLUGIN_MAX_FILE_BYTES": "131072",
         "PLUGIN_MAX_TOTAL_BYTES": "524288",
         "PLUGIN_KEEP_FAILED_WORKSPACES": "false",
+        "PLUGIN_EXECUTION_BACKEND": "container",
+        "PLUGIN_CONTAINER_RUNTIME": "/opt/bin/docker",
+        "PLUGIN_CONTAINER_IMAGE": "registry.example.test/plugin-runtime:v1",
+        "PLUGIN_PROJECT_CONTAINER_NETWORKS": "store:store-private,ops:ops-private",
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -135,6 +143,13 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
     assert settings.plugin_max_file_bytes == 131_072
     assert settings.plugin_max_total_bytes == 524_288
     assert settings.plugin_keep_failed_workspaces is False
+    assert settings.plugin_execution_backend == "container"
+    assert settings.plugin_container_runtime == "/opt/bin/docker"
+    assert settings.plugin_container_image == "registry.example.test/plugin-runtime:v1"
+    assert settings.plugin_project_container_networks == (
+        "store:store-private",
+        "ops:ops-private",
+    )
 
 
 def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
@@ -171,6 +186,10 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     assert settings.plugin_max_file_bytes == 262_144
     assert settings.plugin_max_total_bytes == 1_048_576
     assert settings.plugin_keep_failed_workspaces is True
+    assert settings.plugin_execution_backend == "process"
+    assert settings.plugin_container_runtime == "docker"
+    assert settings.plugin_container_image == "self-grow-agent-plugin-runtime:latest"
+    assert settings.plugin_project_container_networks == ()
 
 
 @pytest.mark.parametrize(
@@ -204,6 +223,11 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
         ("plugin_project_env_allowlist", ("store:MANAGEMENT_API_KEY",)),
         ("plugin_project_env_allowlist", ("Invalid:MYSQL_PASSWORD",)),
         ("plugin_project_env_allowlist", ("store:MYSQL_USER", "store:MYSQL_USER")),
+        ("plugin_execution_backend", "unknown"),
+        ("plugin_container_runtime", ""),
+        ("plugin_container_image", "bad image"),
+        ("plugin_project_container_networks", ("Invalid:private",)),
+        ("plugin_project_container_networks", ("store:private", "store:other")),
     ],
 )
 def test_settings_reject_unsafe_values(field: str, value: object) -> None:
@@ -242,6 +266,10 @@ def test_settings_reject_unsafe_values(field: str, value: object) -> None:
         "plugin_max_file_bytes": 262_144,
         "plugin_max_total_bytes": 1_048_576,
         "plugin_keep_failed_workspaces": True,
+        "plugin_execution_backend": "process",
+        "plugin_container_runtime": "docker",
+        "plugin_container_image": "self-grow-agent-plugin-runtime:latest",
+        "plugin_project_container_networks": (),
     }
     values[field] = value
 
