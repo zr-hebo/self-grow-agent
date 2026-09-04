@@ -197,6 +197,7 @@ export GENERATION_BACKEND='pi'
 export PI_EXECUTABLE='pi'
 export PI_PROVIDER='deepseek'
 export PI_MODEL='deepseek-v4-pro'
+export PI_THINKING_LEVEL='off'
 export PI_TIMEOUT_SECONDS='600'
 export PI_MAX_EVENT_STREAM_BYTES='67108864'
 export PI_MAX_CONCURRENT_RUNS='1'
@@ -205,7 +206,9 @@ export PI_WORKSPACE_ROOT="$PWD/generated/pi-workspaces"
 export PI_PROVIDER_ENV_NAME='DEEPSEEK_API_KEY'
 ```
 
-`LLM_API_KEY` 由 Python 配置加载后，只通过 `PI_PROVIDER_ENV_NAME` 指定的环境变量传给 Pi，不会出现在 Pi 命令行、SQLite、HTTP 响应或日志中。该变量名必须以 `API_KEY` 或 `TOKEN` 结尾；`PI_PROVIDER` 和 `PI_MODEL` 会作为明确的 RPC 启动参数，避免使用开发者个人 Pi 默认模型。
+`LLM_API_KEY` 由 Python 配置加载后，只通过 `PI_PROVIDER_ENV_NAME` 指定的环境变量传给 Pi，不会出现在 Pi 命令行、SQLite、HTTP 响应或日志中。该变量名必须以 `API_KEY` 或 `TOKEN` 结尾；`PI_PROVIDER`、`PI_MODEL` 和 `PI_THINKING_LEVEL` 会作为明确的 RPC 启动参数，避免使用开发者个人 Pi 默认配置。
+
+`PI_THINKING_LEVEL` 默认为 `off`。这是结构化 handler/plugin JSON 生成的推荐值：Pi 自身默认使用 `medium`，但 `deepseek-v4-pro` 仅提供 `off`、`high` 和 `max`，Pi 会把不受支持的 `medium` 或 `low` 向上调整为 `high`，可能产生数十万个推理 token 并触发运行超时。确需深度推理时可显式改为 `high` 或 `max`，同时评估运行时间和成本。
 
 Pi 进程以以下受控方式运行：
 

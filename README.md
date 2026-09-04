@@ -33,7 +33,7 @@ export LLM_BASE_URL='https://api.deepseek.com'
 uv run python main.py
 ```
 
-若要生成带普通 import、多文件和测试的完整 API 插件，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`，并在请求中传 `"execution_mode":"plugin"`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
+若要生成带普通 import、多文件和测试的完整 API 插件，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`、`PI_THINKING_LEVEL=off`，并在请求中传 `"execution_mode":"plugin"`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
 
 MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
@@ -200,6 +200,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `PI_EXECUTABLE` | `pi` | Pi CLI 可执行文件路径 |
 | `PI_PROVIDER` | `deepseek` | Pi 使用的模型提供方 |
 | `PI_MODEL` | `deepseek-v4-pro` | Pi 使用的模型 |
+| `PI_THINKING_LEVEL` | `off` | Pi 思考强度；结构化代码生成默认关闭，避免 DeepSeek V4 Pro 将不支持的 `medium/low` 向上调整为 `high` |
 | `PI_TIMEOUT_SECONDS` | `600` | 单次 Pi RPC 运行超时秒数 |
 | `PI_MAX_EVENT_STREAM_BYTES` | `67108864` | 单次 Pi RPC JSONL 事件流累计传输上限（64 MiB） |
 | `PI_MAX_CONCURRENT_RUNS` | `1` | 同时运行的 Pi 进程上限 |

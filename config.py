@@ -46,6 +46,9 @@ _RESERVED_PLUGIN_ENV_NAMES = frozenset(
         "DYLD_INSERT_LIBRARIES",
     }
 )
+_PI_THINKING_LEVELS = frozenset(
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +75,7 @@ class Settings:
     pi_executable: str = "pi"
     pi_provider: str = "deepseek"
     pi_model: str = "deepseek-v4-pro"
+    pi_thinking_level: str = "off"
     pi_timeout_seconds: float = 600.0
     pi_max_event_stream_bytes: int = 67_108_864
     pi_max_concurrent_runs: int = 1
@@ -108,6 +112,11 @@ class Settings:
         for name, value in required_pi_text.items():
             if not value or value != value.strip():
                 raise ValueError(f"{name} must be a non-empty string without outer whitespace")
+        if self.pi_thinking_level not in _PI_THINKING_LEVELS:
+            raise ValueError(
+                "PI_THINKING_LEVEL must be one of off, minimal, low, medium, "
+                "high, xhigh, or max"
+            )
         if (
             _PI_PROVIDER_ENV_NAME_PATTERN.fullmatch(self.pi_provider_env_name) is None
             or self.pi_provider_env_name in _RESERVED_PI_PROVIDER_ENV_NAMES
@@ -227,6 +236,7 @@ def load_settings() -> Settings:
         pi_executable=environ.get("PI_EXECUTABLE", "pi"),
         pi_provider=environ.get("PI_PROVIDER", "deepseek"),
         pi_model=environ.get("PI_MODEL", "deepseek-v4-pro"),
+        pi_thinking_level=environ.get("PI_THINKING_LEVEL", "off"),
         pi_timeout_seconds=float(environ.get("PI_TIMEOUT_SECONDS", "600")),
         pi_max_event_stream_bytes=int(
             environ.get("PI_MAX_EVENT_STREAM_BYTES", "67108864")

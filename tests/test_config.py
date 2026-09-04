@@ -31,6 +31,7 @@ SETTING_ENV_VARS = (
     "PI_EXECUTABLE",
     "PI_PROVIDER",
     "PI_MODEL",
+    "PI_THINKING_LEVEL",
     "PI_TIMEOUT_SECONDS",
     "PI_MAX_EVENT_STREAM_BYTES",
     "PI_MAX_CONCURRENT_RUNS",
@@ -79,6 +80,7 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
         "PI_EXECUTABLE": "/opt/pi/bin/pi",
         "PI_PROVIDER": "deepseek",
         "PI_MODEL": "deepseek-v4-pro",
+        "PI_THINKING_LEVEL": "high",
         "PI_TIMEOUT_SECONDS": "240",
         "PI_MAX_EVENT_STREAM_BYTES": "33554432",
         "PI_MAX_CONCURRENT_RUNS": "2",
@@ -123,6 +125,7 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
     assert settings.pi_executable == "/opt/pi/bin/pi"
     assert settings.pi_provider == "deepseek"
     assert settings.pi_model == "deepseek-v4-pro"
+    assert settings.pi_thinking_level == "high"
     assert settings.pi_timeout_seconds == 240
     assert settings.pi_max_event_stream_bytes == 33_554_432
     assert settings.pi_max_concurrent_runs == 2
@@ -170,6 +173,7 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     assert settings.pi_executable == "pi"
     assert settings.pi_provider == "deepseek"
     assert settings.pi_model == "deepseek-v4-pro"
+    assert settings.pi_thinking_level == "off"
     assert settings.pi_timeout_seconds == 600
     assert settings.pi_max_event_stream_bytes == 67_108_864
     assert settings.pi_max_concurrent_runs == 1
@@ -209,6 +213,7 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
         ("pi_executable", ""),
         ("pi_provider", " "),
         ("pi_model", ""),
+        ("pi_thinking_level", "verbose"),
         ("pi_timeout_seconds", 0),
         ("pi_max_event_stream_bytes", 0),
         ("pi_max_concurrent_runs", 0),
@@ -252,6 +257,7 @@ def test_settings_reject_unsafe_values(field: str, value: object) -> None:
         "pi_executable": "pi",
         "pi_provider": "deepseek",
         "pi_model": "deepseek-v4-pro",
+        "pi_thinking_level": "off",
         "pi_timeout_seconds": 600.0,
         "pi_max_event_stream_bytes": 67_108_864,
         "pi_max_concurrent_runs": 1,

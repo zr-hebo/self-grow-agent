@@ -540,6 +540,7 @@ def _build_pi_rpc_client(settings: Settings) -> PiRpcClient:
         command=(settings.pi_executable,),
         provider=settings.pi_provider,
         model=settings.pi_model,
+        thinking_level=settings.pi_thinking_level,
         api_key=settings.llm_api_key,
         provider_env_name=settings.pi_provider_env_name,
         timeout_seconds=settings.pi_timeout_seconds,

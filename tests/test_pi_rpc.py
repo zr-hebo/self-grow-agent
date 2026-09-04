@@ -62,11 +62,13 @@ def _client(
     *script_args: str,
     timeout_seconds: float = 2,
     max_event_stream_bytes: int = 64 * 1024 * 1024,
+    thinking_level: str = "off",
 ) -> PiRpcClient:
     return PiRpcClient(
         command=(sys.executable, str(script), *script_args),
         provider="deepseek",
         model="deepseek-chat",
+        thinking_level=thinking_level,
         api_key=API_KEY,
         provider_env_name="DEEPSEEK_API_KEY",
         timeout_seconds=timeout_seconds,
@@ -159,7 +161,10 @@ def test_logs_rpc_lifecycle_metrics_without_prompt_output_stderr_or_key(
     assert "pi_rpc run_queued" in logs
     assert "operation_id=operation-456" in logs
     assert "generation_id=generation-789" in logs
-    assert "provider='deepseek' model='deepseek-chat' timeout_seconds=2.000" in logs
+    assert (
+        "provider='deepseek' model='deepseek-chat' thinking_level='off' "
+        "timeout_seconds=2.000"
+    ) in logs
     assert "prompt_chars=" in logs
     assert "prompt_bytes=" in logs
     assert "pi_rpc process_started" in logs
@@ -600,6 +605,24 @@ def test_rejects_invalid_event_stream_limit(
         )
 
 
+@pytest.mark.parametrize("thinking_level", ["", "medium ", "unknown", 1])
+def test_rejects_invalid_thinking_level(
+    tmp_path: Path,
+    thinking_level: object,
+) -> None:
+    with pytest.raises(ValueError, match="thinking_level"):
+        PiRpcClient(
+            command=("pi",),
+            provider="deepseek",
+            model="deepseek-chat",
+            thinking_level=thinking_level,  # type: ignore[arg-type]
+            api_key=API_KEY,
+            provider_env_name="DEEPSEEK_API_KEY",
+            timeout_seconds=1,
+            workspace_root=tmp_path,
+        )
+
+
 @pytest.mark.parametrize(
     "provider_env_name",
     ["PATH", "TMPDIR", "NODE_OPTIONS", "lower_API_KEY"],
@@ -675,6 +698,8 @@ def test_uses_isolated_environment_safe_flags_and_private_directories(tmp_path: 
         "--no-context-files",
         "--no-approve",
         "--no-tools",
+        "--thinking",
+        "off",
         "--provider",
         "deepseek",
         "--model",

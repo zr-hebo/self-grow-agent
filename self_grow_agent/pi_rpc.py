@@ -34,6 +34,9 @@ _CREDENTIAL_ENV_NAME = re.compile(r"(?:[A-Z][A-Z0-9_]*_)?(?:API_KEY|TOKEN)\Z")
 _MAX_JSONL_BYTES = 1_048_576
 _DEFAULT_MAX_EVENT_STREAM_BYTES = 67_108_864
 _MAX_RETAINED_EVENTS = 10_000
+_THINKING_LEVELS = frozenset(
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+)
 _STREAMING_EVENT_TYPES = frozenset(
     {
         "bash_execution_update",
@@ -138,6 +141,7 @@ class PiRpcClient:
         *,
         provider: str,
         model: str,
+        thinking_level: str = "off",
         provider_env_name: str,
         workspace_root: str | Path,
         command: tuple[str, ...] = ("pi",),
@@ -148,6 +152,9 @@ class PiRpcClient:
         self._command = _validate_command(command)
         self._provider = _validate_cli_value(provider, "provider")
         self._model = _validate_cli_value(model, "model")
+        if not isinstance(thinking_level, str) or thinking_level not in _THINKING_LEVELS:
+            raise ValueError("thinking_level must be a supported Pi thinking level")
+        self._thinking_level = thinking_level
         self._provider_env_name = _validate_provider_env_name(provider_env_name)
         if not isinstance(api_key, str) or "\0" in api_key:
             raise ValueError("api_key must be a string without NUL characters")
@@ -181,13 +188,15 @@ class PiRpcClient:
         started_at = time.monotonic()
         _logger.info(
             "pi_rpc run_queued operation_id=%s generation_id=%s run_id=%s "
-            "provider=%r model=%r timeout_seconds=%.3f max_event_stream_bytes=%s "
+            "provider=%r model=%r thinking_level=%r timeout_seconds=%.3f "
+            "max_event_stream_bytes=%s "
             "prompt_chars=%s prompt_bytes=%s",
             operation_id,
             generation_id,
             run_id,
             self._provider,
             self._model,
+            self._thinking_level,
             self._timeout_seconds,
             self._max_event_stream_bytes,
             len(prompt),
@@ -279,7 +288,7 @@ class PiRpcClient:
                 _logger.info(
                     "pi_rpc process_started operation_id=%s generation_id=%s "
                     "run_id=%s pid=%s "
-                    "provider=%r model=%r "
+                    "provider=%r model=%r thinking_level=%r "
                     "timeout_seconds=%.3f",
                     operation_id,
                     generation_id,
@@ -287,6 +296,7 @@ class PiRpcClient:
                     process.pid,
                     self._provider,
                     self._model,
+                    self._thinking_level,
                     self._timeout_seconds,
                 )
                 if process.stdin is None or process.stdout is None or process.stderr is None:
@@ -374,6 +384,8 @@ class PiRpcClient:
             "--no-context-files",
             "--no-approve",
             "--no-tools",
+            "--thinking",
+            self._thinking_level,
             "--provider",
             self._provider,
             "--model",
