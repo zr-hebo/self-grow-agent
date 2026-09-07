@@ -93,6 +93,36 @@ def test_propagates_registered_capability_error_without_marking_it_successful(
     assert raised.value.status_code == 503
 
 
+def test_generated_handler_cannot_swallow_registered_capability_error(
+    tmp_path: Path,
+) -> None:
+    artifact, digest = _artifact(
+        tmp_path,
+        "import logging\n"
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    try:\n"
+        "        return rebuild_replication(request['body']['instance'])\n"
+        "    except Exception:\n"
+        "        logging.getLogger(__name__).error('capability failed')\n"
+        "        return {'ok': False, 'error': 'operation failed'}\n",
+    )
+
+    with pytest.raises(
+        PluginCapabilityError,
+        match="MySQL capability credentials are not configured",
+    ) as raised:
+        _executor().execute(
+            artifact,
+            digest,
+            {"body": {"instance": "127.0.0.1:3306"}},
+        )
+
+    assert raised.value.code == "mysql_credentials_not_configured"
+    assert raised.value.status_code == 503
+
+
 def test_times_out_and_reaps_plugin_process(tmp_path: Path) -> None:
     artifact, digest = _artifact(
         tmp_path,

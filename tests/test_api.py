@@ -1705,6 +1705,66 @@ def test_capability_failure_preserves_status_and_safe_reason(tmp_path: Path) -> 
     assert_api_error(response, "MySQL capability credentials are not configured")
 
 
+def test_capability_failure_caught_by_generated_handler_still_returns_non_2xx(
+    tmp_path: Path,
+) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(
+        settings.generated_dir,
+        plugin_artifact_root=settings.plugin_artifact_root,
+    )
+    plugin = GeneratedPlugin(
+        files=(
+            PluginFile(
+                path="handler.py",
+                content=(
+                    "from self_grow_agent.capabilities.mysql_replication "
+                    "import rebuild_replication_from_message\n\n"
+                    "def handle(request):\n"
+                    "    try:\n"
+                    "        return rebuild_replication_from_message(\n"
+                    "            request['body']['raw-message']\n"
+                    "        )\n"
+                    "    except Exception:\n"
+                    "        return {'ok': False, 'error': 'operation failed'}\n"
+                ),
+            ),
+            PluginFile(
+                path="tests/test_handler.py",
+                content="def test_ok():\n    assert True\n",
+            ),
+        )
+    )
+    artifact, digest = _publish_artifact(
+        artifact_root=runtime.plugin_artifact_root,
+        project="binlog-server",
+        route_id="post-h-binlog-server-rebuild-replication-test",
+        version=1,
+        plugin=plugin,
+    )
+    runtime.create_plugin(
+        "/binlog-server/rebuild_replication",
+        "POST",
+        artifact_path=artifact,
+        artifact_digest=digest,
+        project="binlog-server",
+    )
+    app = build_app(
+        settings=settings,
+        generator=None,
+        runtime=runtime,
+        plugin_executor=PluginProcessExecutor(timeout_seconds=2),
+    )
+
+    response = TestClient(app).post(
+        "/binlog-server/rebuild_replication",
+        json={"raw-message": "Instance: 127.0.0.1:3306"},
+    )
+
+    assert response.status_code == 503
+    assert_api_error(response, "MySQL capability credentials are not configured")
+
+
 def test_handler_capacity_rejects_waiters_before_reading_business_body(
     tmp_path: Path,
 ) -> None:

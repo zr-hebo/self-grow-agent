@@ -11,7 +11,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from self_grow_agent.capabilities.errors import CapabilityError
+from self_grow_agent.capabilities.errors import (
+    CapabilityError,
+    capture_capability_errors,
+)
 from self_grow_agent.executor import _apply_resource_limits
 from self_grow_agent.plugin_runtime import verify_plugin_artifact
 
@@ -57,6 +60,7 @@ def main() -> int:
     protocol_output = sys.stdout.buffer
     response: dict[str, Any]
     log_handler = _ProtocolLogHandler()
+    captured_capability_errors: list[str] = []
     try:
         artifact, digest, memory_text, cpu_text, result_limit_text = sys.argv[1:6]
         memory_limit = int(memory_text) or None
@@ -76,25 +80,37 @@ def main() -> int:
             root_logger.handlers = [log_handler]
             root_logger.setLevel(logging.INFO)
             try:
-                handler = _load_handler(Path(artifact))
-                result = handler(request)
+                with capture_capability_errors() as captured_capability_errors:
+                    handler = _load_handler(Path(artifact))
+                    result = handler(request)
             finally:
                 root_logger.handlers = previous_handlers
                 root_logger.setLevel(previous_level)
-        encoded_result = json.dumps(
-            result,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if len(encoded_result) > result_limit:
+        if captured_capability_errors:
             response = {
-                "status": "error",
-                "message": "plugin handler result exceeded byte limit",
+                "status": "capability_error",
+                "error_code": captured_capability_errors[0],
                 "logs": log_handler.events,
             }
         else:
-            response = {"status": "ok", "result": result, "logs": log_handler.events}
+            encoded_result = json.dumps(
+                result,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            if len(encoded_result) > result_limit:
+                response = {
+                    "status": "error",
+                    "message": "plugin handler result exceeded byte limit",
+                    "logs": log_handler.events,
+                }
+            else:
+                response = {
+                    "status": "ok",
+                    "result": result,
+                    "logs": log_handler.events,
+                }
     except CapabilityError as exc:
         response = {
             "status": "capability_error",
@@ -102,11 +118,18 @@ def main() -> int:
             "logs": log_handler.events,
         }
     except BaseException as exc:
-        response = {
-            "status": "error",
-            "message": _safe_error(exc),
-            "logs": log_handler.events,
-        }
+        if captured_capability_errors:
+            response = {
+                "status": "capability_error",
+                "error_code": captured_capability_errors[0],
+                "logs": log_handler.events,
+            }
+        else:
+            response = {
+                "status": "error",
+                "message": _safe_error(exc),
+                "logs": log_handler.events,
+            }
 
     try:
         protocol_output.write(
