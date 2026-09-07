@@ -72,8 +72,9 @@ Plugin requirements:
   receives a validated `ip:port`, `rebuild_replication` is also allowed. Do not import
   database drivers, declare database-driver dependencies, parse the Instance line in
   generated code, accept SQL text, or construct SQL statements. The controlled
-  capability owns parsing, validation, credentials, fixed statements, retries, and
-  step logs. Capability failures raise a platform exception that the handler must not
+  capability owns parsing one or more Instance lines, validation, deduplication,
+  credentials, fixed statements, retries, and step logs. It processes at most 16 unique
+  instances from one aggregated message. Capability failures raise a platform exception that the handler must not
   catch or convert into an `ok: false` success payload; let it propagate so the API can
   return the registered non-2xx status and safe error response.
 - Use Python's standard `logging` module for requested operational step logs. Never

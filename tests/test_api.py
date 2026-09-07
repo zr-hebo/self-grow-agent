@@ -1758,7 +1758,12 @@ def test_capability_failure_caught_by_generated_handler_still_returns_non_2xx(
 
     response = TestClient(app).post(
         "/binlog-server/rebuild_replication",
-        json={"raw-message": "Instance: 127.0.0.1:3306"},
+        json={
+            "raw-message": (
+                "Instance: 127.0.0.1:3306\n"
+                "Instance: 127.0.0.2:3306"
+            )
+        },
     )
 
     assert response.status_code == 503

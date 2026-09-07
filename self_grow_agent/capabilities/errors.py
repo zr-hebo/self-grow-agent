@@ -9,7 +9,7 @@ from typing import Final
 _ERROR_DETAILS: Final[dict[str, tuple[int, str]]] = {
     "mysql_alert_instance_invalid": (
         422,
-        "raw-message must contain exactly one valid Instance: ip:port line",
+        "raw-message must contain 1 to 16 valid Instance: ip:port lines",
     ),
     "mysql_instance_invalid": (422, "invalid MySQL instance; expected ip:port"),
     "mysql_credentials_not_configured": (

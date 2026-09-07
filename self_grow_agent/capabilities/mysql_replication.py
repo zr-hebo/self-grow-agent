@@ -16,15 +16,18 @@ _STATEMENTS = (
     ("start_replica", "START REPLICA"),
 )
 _MAX_RETRIES = 2
+_MAX_INSTANCES_PER_MESSAGE = 16
 
 
 def rebuild_replication_from_message(
     raw_message: object, *, retries: int = 2
 ) -> dict[str, Any]:
-    """Extract one instance from an alert message and restart its replication.
+    """Extract unique instances from an alert message and restart replication.
 
     Generated handlers should use this entry point for ``raw-message`` requests so
     parsing, validation, database access, retries, and logs all remain platform-owned.
+    A single-instance message retains the original response shape. Aggregated messages
+    return an ordered result for every unique instance.
     """
 
     _validate_retries(retries)
@@ -34,21 +37,66 @@ def rebuild_replication_from_message(
         "mysql_replication step=parse_instance outcome=started message_chars=%s",
         message_chars,
     )
-    instance = _instance_from_message(raw_message)
-    if instance is None:
+    instances = _instances_from_message(raw_message)
+    if instances is None:
         _LOGGER.warning(
             "mysql_replication step=parse_instance outcome=failed "
-            "reason=missing_ambiguous_or_invalid elapsed_seconds=%.3f",
+            "reason=missing_invalid_or_too_many max_instances=%s "
+            "elapsed_seconds=%.3f",
+            _MAX_INSTANCES_PER_MESSAGE,
             time.monotonic() - started_at,
         )
         raise CapabilityError("mysql_alert_instance_invalid")
     _LOGGER.info(
-        "mysql_replication instance=%s step=parse_instance outcome=succeeded "
+        "mysql_replication step=parse_instance outcome=succeeded instance_count=%s "
         "elapsed_seconds=%.3f",
-        instance,
+        len(instances),
         time.monotonic() - started_at,
     )
-    return rebuild_replication(instance, retries=retries)
+    for instance in instances:
+        _LOGGER.info(
+            "mysql_replication instance=%s step=parse_instance outcome=succeeded",
+            instance,
+        )
+    if len(instances) == 1:
+        return rebuild_replication(instances[0], retries=retries)
+
+    results: list[dict[str, Any]] = []
+    for index, instance in enumerate(instances, start=1):
+        instance_started = time.monotonic()
+        _LOGGER.info(
+            "mysql_replication instance=%s step=batch_instance instance_index=%s "
+            "instance_count=%s outcome=started",
+            instance,
+            index,
+            len(instances),
+        )
+        try:
+            result = rebuild_replication(instance, retries=retries)
+        except CapabilityError:
+            _LOGGER.warning(
+                "mysql_replication instance=%s step=batch_instance instance_index=%s "
+                "instance_count=%s outcome=failed elapsed_seconds=%.3f",
+                instance,
+                index,
+                len(instances),
+                time.monotonic() - instance_started,
+            )
+            raise
+        results.append(result)
+        _LOGGER.info(
+            "mysql_replication instance=%s step=batch_instance instance_index=%s "
+            "instance_count=%s outcome=succeeded elapsed_seconds=%.3f",
+            instance,
+            index,
+            len(instances),
+            time.monotonic() - instance_started,
+        )
+    return {
+        "ok": True,
+        "instance_count": len(instances),
+        "results": results,
+    }
 
 
 def rebuild_replication(instance: str, *, retries: int = 2) -> dict[str, Any]:
@@ -167,7 +215,7 @@ def _validate_retries(retries: object) -> None:
         raise ValueError("retries must be an integer between 0 and 2")
 
 
-def _instance_from_message(raw_message: object) -> str | None:
+def _instances_from_message(raw_message: object) -> tuple[str, ...] | None:
     if not isinstance(raw_message, str):
         return None
     candidates: list[str] = []
@@ -175,13 +223,23 @@ def _instance_from_message(raw_message: object) -> str | None:
         label, separator, value = line.partition(":")
         if separator and label.strip().casefold() == "instance":
             candidates.append(value.strip())
-    if len(candidates) != 1:
+    if not candidates:
         return None
-    target = _parse_instance(candidates[0])
-    if target is None:
-        return None
-    host, port = target
-    return f"{host}:{port}"
+    instances: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        target = _parse_instance(candidate)
+        if target is None:
+            return None
+        host, port = target
+        instance = f"{host}:{port}"
+        if instance in seen:
+            continue
+        seen.add(instance)
+        instances.append(instance)
+        if len(instances) > _MAX_INSTANCES_PER_MESSAGE:
+            return None
+    return tuple(instances)
 
 
 def _connect(**kwargs: Any) -> Any:

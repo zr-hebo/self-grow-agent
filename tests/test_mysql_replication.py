@@ -167,16 +167,81 @@ RDS Cluster UUID : ab95fc1a268dffc8
     assert "step=credentials outcome=succeeded" in log_text
 
 
+def test_processes_each_unique_instance_from_aggregated_alert_message(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_message = """\
+[active][error]
+Instance: 10.159.21.16:6606
+[active][error]
+Instance: 10.241.147.122:6606
+[active][error]
+Instance: 10.159.21.16:6606
+"""
+    connections: list[tuple[str, FakeConnection]] = []
+
+    def connect(**kwargs: Any) -> FakeConnection:
+        connection = FakeConnection(FakeCursor())
+        connections.append((f"{kwargs['host']}:{kwargs['port']}", connection))
+        return connection
+
+    monkeypatch.setattr(mysql_replication, "_connect", connect)
+    monkeypatch.setenv("MYSQL_USER", "replication-operator")
+    monkeypatch.setenv("MYSQL_PASSWORD", secrets.token_urlsafe(24))
+    caplog.set_level(logging.INFO, logger="self_grow_agent.capability.mysql_replication")
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result == {
+        "ok": True,
+        "instance_count": 2,
+        "results": [
+            {
+                "ok": True,
+                "instance": "10.159.21.16:6606",
+                "attempts": 1,
+                "steps": [
+                    {"name": "stop_replica", "ok": True},
+                    {"name": "start_replica", "ok": True},
+                ],
+            },
+            {
+                "ok": True,
+                "instance": "10.241.147.122:6606",
+                "attempts": 1,
+                "steps": [
+                    {"name": "stop_replica", "ok": True},
+                    {"name": "start_replica", "ok": True},
+                ],
+            },
+        ],
+    }
+    assert [instance for instance, _ in connections] == [
+        "10.159.21.16:6606",
+        "10.241.147.122:6606",
+    ]
+    assert all(connection.closed for _, connection in connections)
+    assert all(
+        connection._cursor.statements == ["STOP REPLICA", "START REPLICA"]
+        for _, connection in connections
+    )
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "step=parse_instance outcome=succeeded instance_count=2" in log_text
+    assert "step=batch_instance instance_index=1 instance_count=2 outcome=started" in log_text
+    assert "step=batch_instance instance_index=2 instance_count=2 outcome=succeeded" in log_text
+
+
 @pytest.mark.parametrize(
     "raw_message",
     [
         None,
         "no instance here",
         "Instance: db.internal:3306",
-        "Instance: 10.0.0.1:3306\nInstance: 10.0.0.2:3306",
+        "Instance: 10.0.0.1:3306\nInstance: db.internal:3306",
     ],
 )
-def test_rejects_missing_invalid_or_ambiguous_instance_in_message(
+def test_rejects_missing_or_invalid_instance_in_message(
     raw_message: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -187,6 +252,25 @@ def test_rejects_missing_invalid_or_ambiguous_instance_in_message(
     )
 
     with pytest.raises(CapabilityError, match="raw-message must contain") as raised:
+        mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert raised.value.code == "mysql_alert_instance_invalid"
+    assert raised.value.status_code == 422
+
+
+def test_rejects_aggregated_message_above_instance_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_message = "\n".join(
+        f"Instance: 10.0.0.{index}:3306" for index in range(1, 18)
+    )
+    monkeypatch.setattr(
+        mysql_replication,
+        "_connect",
+        lambda **kwargs: pytest.fail(f"unexpected connect: {kwargs}"),
+    )
+
+    with pytest.raises(CapabilityError, match="1 to 16 valid Instance") as raised:
         mysql_replication.rebuild_replication_from_message(raw_message)
 
     assert raised.value.code == "mysql_alert_instance_invalid"

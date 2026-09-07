@@ -115,6 +115,7 @@ def test_generates_valid_plugin_and_bounds_instruction_as_json_data() -> None:
     }
     assert '`request["body"]["raw-message"]`' in prompt
     assert "rebuild_replication_from_message" in prompt
+    assert "at most 16 unique" in prompt
 
 
 def test_update_prompt_contains_complete_current_plugin() -> None:
