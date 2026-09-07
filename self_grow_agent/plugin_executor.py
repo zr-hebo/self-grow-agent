@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
+from self_grow_agent.capabilities.errors import capability_error_details
 from self_grow_agent.plugin_runtime import verify_plugin_artifact
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -53,6 +54,16 @@ class PluginProcessError(RuntimeError):
 
 class PluginTimeoutError(PluginProcessError):
     """A plugin worker exceeded its wall-clock deadline."""
+
+
+class PluginCapabilityError(PluginProcessError):
+    """A safe controlled-capability error returned by the plugin worker."""
+
+    def __init__(self, code: str) -> None:
+        status_code, message = capability_error_details(code)
+        self.code = code
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class PluginExecutor(Protocol):
@@ -499,7 +510,11 @@ def _decode_worker_response(
         response = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise PluginProcessError("plugin worker returned invalid JSON") from None
-    if not isinstance(response, dict) or response.get("status") not in {"ok", "error"}:
+    if not isinstance(response, dict) or response.get("status") not in {
+        "ok",
+        "error",
+        "capability_error",
+    }:
         raise PluginProcessError("plugin worker returned invalid response")
     logs = response.get("logs")
     if not _valid_plugin_logs(logs):
@@ -509,6 +524,13 @@ def _decode_worker_response(
         artifact=artifact,
         redacted_values=_sensitive_values(request, allowed_environment),
     )
+    if response["status"] == "capability_error":
+        if set(response) != {"status", "error_code", "logs"}:
+            raise PluginProcessError("plugin worker returned invalid response")
+        try:
+            raise PluginCapabilityError(response["error_code"])
+        except ValueError:
+            raise PluginProcessError("plugin worker returned invalid response") from None
     if response["status"] == "error":
         message = response.get("message")
         if not isinstance(message, str) or not message.startswith("plugin "):
@@ -613,6 +635,7 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
 
 __all__ = [
     "ContainerPluginExecutor",
+    "PluginCapabilityError",
     "PluginExecutor",
     "PluginProcessError",
     "PluginProcessExecutor",

@@ -50,7 +50,12 @@ def test_generated_tests_can_import_controlled_platform_capability(tmp_path: Pat
         tmp_path,
         "from handler import handle\n\n"
         "def test_handler_imports_capability():\n"
-        "    assert handle({'body': {'instance': 'bad'}})['ok'] is False\n",
+        "    try:\n"
+        "        handle({'body': {'instance': 'bad'}})\n"
+        "    except RuntimeError as exc:\n"
+        "        assert str(exc) == 'invalid MySQL instance; expected ip:port'\n"
+        "    else:\n"
+        "        raise AssertionError('capability failure was swallowed')\n",
     )
     (source / "handler.py").write_text(
         "from self_grow_agent.capabilities.mysql_replication "

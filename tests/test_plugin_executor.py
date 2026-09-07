@@ -9,6 +9,7 @@ import pytest
 from self_grow_agent import plugin_executor as plugin_executor_module
 from self_grow_agent.plugin_executor import (
     ContainerPluginExecutor,
+    PluginCapabilityError,
     PluginProcessError,
     PluginProcessExecutor,
     PluginTimeoutError,
@@ -65,6 +66,31 @@ def test_reports_safe_handler_exception_category(tmp_path: Path) -> None:
         _executor().execute(artifact, digest, {"body": {"secret": secret}})
 
     assert secret not in str(raised.value)
+
+
+def test_propagates_registered_capability_error_without_marking_it_successful(
+    tmp_path: Path,
+) -> None:
+    artifact, digest = _artifact(
+        tmp_path,
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication\n\n"
+        "def handle(request):\n"
+        "    return rebuild_replication(request['body']['instance'])\n",
+    )
+
+    with pytest.raises(
+        PluginCapabilityError,
+        match="MySQL capability credentials are not configured",
+    ) as raised:
+        _executor().execute(
+            artifact,
+            digest,
+            {"body": {"instance": "127.0.0.1:3306"}},
+        )
+
+    assert raised.value.code == "mysql_credentials_not_configured"
+    assert raised.value.status_code == 503
 
 
 def test_times_out_and_reaps_plugin_process(tmp_path: Path) -> None:

@@ -73,7 +73,9 @@ Plugin requirements:
   database drivers, declare database-driver dependencies, parse the Instance line in
   generated code, accept SQL text, or construct SQL statements. The controlled
   capability owns parsing, validation, credentials, fixed statements, retries, and
-  step logs.
+  step logs. Capability failures raise a platform exception that the handler must not
+  catch or convert into an `ok: false` success payload; let it propagate so the API can
+  return the registered non-2xx status and safe error response.
 - Use Python's standard `logging` module for requested operational step logs. Never
   use print for logs, and never log credentials or complete sensitive payloads.
 - Do not use shell commands, subprocesses, dynamic imports, eval, exec, pickle, ctypes,

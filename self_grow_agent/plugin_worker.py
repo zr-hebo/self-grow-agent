@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from self_grow_agent.capabilities.errors import CapabilityError
 from self_grow_agent.executor import _apply_resource_limits
 from self_grow_agent.plugin_runtime import verify_plugin_artifact
 
@@ -94,6 +95,12 @@ def main() -> int:
             }
         else:
             response = {"status": "ok", "result": result, "logs": log_handler.events}
+    except CapabilityError as exc:
+        response = {
+            "status": "capability_error",
+            "error_code": exc.code,
+            "logs": log_handler.events,
+        }
     except BaseException as exc:
         response = {
             "status": "error",

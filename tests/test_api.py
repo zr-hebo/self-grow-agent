@@ -13,7 +13,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from config import Settings
-from self_grow_agent.api import _instruction_for_log, _request_parameters_for_log
+from self_grow_agent.api import (
+    _instruction_for_log,
+    _plugin_environments_from_settings,
+    _request_parameters_for_log,
+)
 from self_grow_agent.api import create_app as build_app
 from self_grow_agent.code_loader import GeneratedCodeLoader
 from self_grow_agent.executor import HandlerProcessError, HandlerTimeoutError
@@ -21,7 +25,11 @@ from self_grow_agent.llm import GenerationCapacityError, GenerationError
 from self_grow_agent.metadata import RequirementStore
 from self_grow_agent.models import GeneratedHandler
 from self_grow_agent.observability import current_operation_id
-from self_grow_agent.plugin_executor import ContainerPluginExecutor, PluginProcessExecutor
+from self_grow_agent.plugin_executor import (
+    ContainerPluginExecutor,
+    PluginCapabilityError,
+    PluginProcessExecutor,
+)
 from self_grow_agent.plugin_models import GeneratedPlugin, PluginFile
 from self_grow_agent.plugin_runtime import _publish_artifact
 from self_grow_agent.runtime import RoutePersistenceError, RouteRuntime
@@ -159,6 +167,15 @@ class FailingHandlerExecutor:
         raise self.error
 
 
+class FailingPluginExecutor:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def execute(self, artifact_path: str, artifact_digest: str, request: dict) -> object:
+        del artifact_path, artifact_digest, request
+        raise self.error
+
+
 class BlockingHandlerExecutor:
     def __init__(self) -> None:
         self.started = threading.Event()
@@ -252,6 +269,38 @@ def make_settings(tmp_path: Path, *, llm_api_key: str = "") -> Settings:
 
 def management_headers() -> dict[str, str]:
     return {"X-Management-Key": MANAGEMENT_KEY}
+
+
+def test_plugin_environment_uses_settings_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    configured_password = _random_credential()
+    environment_password = _random_credential(configured_password)
+    monkeypatch.setenv("MYSQL_USER", "stale_user")
+    monkeypatch.setenv("MYSQL_PASSWORD", environment_password)
+    monkeypatch.setenv("PLUGIN_REGION", "ap-southeast-1")
+    settings = replace(
+        make_settings(tmp_path),
+        mysql_user="visit_user",
+        mysql_password=configured_password,
+        plugin_project_env_allowlist=(
+            "binlog-server:MYSQL_USER",
+            "binlog-server:MYSQL_PASSWORD",
+            "binlog-server:PLUGIN_REGION",
+        ),
+    )
+
+    environments = _plugin_environments_from_settings(settings)
+
+    assert environments == {
+        "binlog-server": {
+            "MYSQL_USER": "visit_user",
+            "MYSQL_PASSWORD": configured_password,
+            "PLUGIN_REGION": "ap-southeast-1",
+        }
+    }
+    assert configured_password not in repr(settings)
 
 
 def api_data(response: httpx.Response) -> object:
@@ -1619,6 +1668,41 @@ def test_handler_process_failures_are_mapped_to_safe_http_errors(
 
     assert response.status_code == expected_status
     assert_api_error(response, expected_detail)
+
+
+def test_capability_failure_preserves_status_and_safe_reason(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    artifact, digest = _publish_artifact(
+        artifact_root=settings.plugin_artifact_root,
+        project="binlog-server",
+        route_id="post-h-binlog-server-rebuild-replication-test",
+        version=1,
+        plugin=_generated_plugin("unused"),
+    )
+    runtime.create_plugin(
+        "/binlog-server/rebuild_replication",
+        "POST",
+        artifact_path=artifact,
+        artifact_digest=digest,
+        project="binlog-server",
+    )
+    app = build_app(
+        settings=settings,
+        generator=None,
+        runtime=runtime,
+        plugin_executor=FailingPluginExecutor(
+            PluginCapabilityError("mysql_credentials_not_configured")
+        ),
+    )
+
+    response = TestClient(app).post(
+        "/binlog-server/rebuild_replication",
+        json={"raw-message": "Instance: 127.0.0.1:3306"},
+    )
+
+    assert response.status_code == 503
+    assert_api_error(response, "MySQL capability credentials are not configured")
 
 
 def test_handler_capacity_rejects_waiters_before_reading_business_body(

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from self_grow_agent.capabilities import mysql_replication
+from self_grow_agent.capabilities.errors import CapabilityError
 
 
 class FakeCursor:
@@ -108,26 +109,30 @@ def test_rejects_invalid_instance_without_connecting(
         lambda **kwargs: pytest.fail(f"unexpected connect: {kwargs}"),
     )
 
-    result = mysql_replication.rebuild_replication(instance)
+    with pytest.raises(CapabilityError, match="invalid MySQL instance") as raised:
+        mysql_replication.rebuild_replication(instance)
 
-    assert result == {
-        "ok": False,
-        "error": "invalid MySQL instance; expected ip:port",
-        "attempts": 0,
-    }
+    assert raised.value.code == "mysql_instance_invalid"
+    assert raised.value.status_code == 422
 
 
-def test_missing_credentials_returns_safe_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_credentials_returns_safe_error_and_logs_only_missing_names(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     monkeypatch.delenv("MYSQL_USER", raising=False)
     monkeypatch.delenv("MYSQL_PASSWORD", raising=False)
+    caplog.set_level(logging.INFO, logger="self_grow_agent.capability.mysql_replication")
 
-    result = mysql_replication.rebuild_replication("127.0.0.1:3306")
+    with pytest.raises(CapabilityError, match="credentials are not configured") as raised:
+        mysql_replication.rebuild_replication("127.0.0.1:3306")
 
-    assert result == {
-        "ok": False,
-        "error": "MySQL capability credentials are not configured",
-        "attempts": 0,
-    }
+    assert raised.value.code == "mysql_credentials_not_configured"
+    assert raised.value.status_code == 503
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "step=validate_instance outcome=succeeded" in log_text
+    assert "step=credentials outcome=failed" in log_text
+    assert "missing=MYSQL_USER,MYSQL_PASSWORD" in log_text
 
 
 def test_extracts_instance_from_real_alert_message_and_runs_operation(
@@ -159,6 +164,7 @@ RDS Cluster UUID : ab95fc1a268dffc8
     log_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "step=parse_instance outcome=started" in log_text
     assert "instance=10.159.21.16:6606 step=parse_instance outcome=succeeded" in log_text
+    assert "step=credentials outcome=succeeded" in log_text
 
 
 @pytest.mark.parametrize(
@@ -180,13 +186,11 @@ def test_rejects_missing_invalid_or_ambiguous_instance_in_message(
         lambda **kwargs: pytest.fail(f"unexpected connect: {kwargs}"),
     )
 
-    result = mysql_replication.rebuild_replication_from_message(raw_message)
+    with pytest.raises(CapabilityError, match="raw-message must contain") as raised:
+        mysql_replication.rebuild_replication_from_message(raw_message)
 
-    assert result == {
-        "ok": False,
-        "error": "raw-message must contain exactly one valid Instance: ip:port line",
-        "attempts": 0,
-    }
+    assert raised.value.code == "mysql_alert_instance_invalid"
+    assert raised.value.status_code == 422
 
 
 def test_retries_twice_and_never_logs_driver_error_or_password(
@@ -211,15 +215,11 @@ def test_retries_twice_and_never_logs_driver_error_or_password(
     monkeypatch.setenv("MYSQL_PASSWORD", password)
     caplog.set_level(logging.INFO, logger="self_grow_agent.capability.mysql_replication")
 
-    result = mysql_replication.rebuild_replication("127.0.0.1:3306", retries=2)
+    with pytest.raises(CapabilityError, match="MySQL replication operation failed") as raised:
+        mysql_replication.rebuild_replication("127.0.0.1:3306", retries=2)
 
-    assert result == {
-        "ok": False,
-        "error": "MySQL replication operation failed",
-        "instance": "127.0.0.1:3306",
-        "attempts": 3,
-        "failed_step": "start_replica",
-    }
+    assert raised.value.code == "mysql_replication_failed"
+    assert raised.value.status_code == 502
     assert attempts == 3
     assert all(connection.closed for connection in connections)
     log_text = "\n".join(record.getMessage() for record in caplog.records)

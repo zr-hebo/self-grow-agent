@@ -2,7 +2,7 @@
 
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from os import environ
 from pathlib import Path
 
@@ -86,6 +86,8 @@ class Settings:
     plugin_artifact_root: Path = Path("generated/plugins")
     plugin_allowed_dependencies: tuple[str, ...] = ()
     plugin_project_env_allowlist: tuple[str, ...] = ()
+    mysql_user: str = ""
+    mysql_password: str = field(default="", repr=False)
     plugin_max_files: int = 32
     plugin_max_file_bytes: int = 262_144
     plugin_max_total_bytes: int = 1_048_576
@@ -173,6 +175,14 @@ class Settings:
             raise ValueError("PLUGIN_WORKSPACE_ROOT must be outside generated artifacts")
         if any(not dependency.strip() for dependency in self.plugin_allowed_dependencies):
             raise ValueError("PLUGIN_ALLOWED_DEPENDENCIES contains an empty value")
+        if (
+            not isinstance(self.mysql_user, str)
+            or self.mysql_user != self.mysql_user.strip()
+            or "\x00" in self.mysql_user
+        ):
+            raise ValueError("MYSQL_USER must not contain outer whitespace or null bytes")
+        if not isinstance(self.mysql_password, str) or "\x00" in self.mysql_password:
+            raise ValueError("MYSQL_PASSWORD must be a string without null bytes")
         seen_plugin_env: set[tuple[str, str]] = set()
         for entry in self.plugin_project_env_allowlist:
             match = _PLUGIN_ENV_ENTRY.fullmatch(entry)
@@ -261,6 +271,8 @@ def load_settings() -> Settings:
             for entry in environ.get("PLUGIN_PROJECT_ENV_ALLOWLIST", "").split(",")
             if entry.strip()
         ),
+        mysql_user=environ.get("MYSQL_USER", ""),
+        mysql_password=environ.get("MYSQL_PASSWORD", ""),
         plugin_max_files=int(environ.get("PLUGIN_MAX_FILES", "32")),
         plugin_max_file_bytes=int(environ.get("PLUGIN_MAX_FILE_BYTES", "262144")),
         plugin_max_total_bytes=int(environ.get("PLUGIN_MAX_TOTAL_BYTES", "1048576")),

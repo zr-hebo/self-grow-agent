@@ -60,6 +60,7 @@ from self_grow_agent.pi_generator import PiFeatureGenerator
 from self_grow_agent.pi_rpc import PiRpcClient
 from self_grow_agent.plugin_executor import (
     ContainerPluginExecutor,
+    PluginCapabilityError,
     PluginExecutor,
     PluginProcessError,
     PluginProcessExecutor,
@@ -566,6 +567,27 @@ def _build_plugin_generator(settings: Settings) -> PluginFeatureGenerator | None
     )
 
 
+def _plugin_environments_from_settings(
+    settings: Settings,
+) -> dict[str, dict[str, str]]:
+    """Build per-project plugin environments from an immutable settings snapshot."""
+
+    configured_values = {
+        "MYSQL_USER": settings.mysql_user,
+        "MYSQL_PASSWORD": settings.mysql_password,
+    }
+    plugin_environments: dict[str, dict[str, str]] = {}
+    for entry in settings.plugin_project_env_allowlist:
+        project, environment_name = entry.split(":", 1)
+        if environment_name in configured_values:
+            value = configured_values[environment_name]
+        else:
+            value = os.environ.get(environment_name, "")
+        if value:
+            plugin_environments.setdefault(project, {})[environment_name] = value
+    return plugin_environments
+
+
 def _safe_requirement_error(exc: Exception) -> str:
     """Return a persistent failure message that cannot expose provider details."""
 
@@ -779,13 +801,7 @@ def create_app(
         cpu_limit_seconds=active_settings.handler_cpu_limit_seconds,
         max_result_bytes=active_settings.max_handler_result_bytes,
     )
-    plugin_environments: dict[str, dict[str, str]] = {}
-    for entry in active_settings.plugin_project_env_allowlist:
-        project, environment_name = entry.split(":", 1)
-        if environment_name in os.environ:
-            plugin_environments.setdefault(project, {})[environment_name] = os.environ[
-                environment_name
-            ]
+    plugin_environments = _plugin_environments_from_settings(active_settings)
     plugin_networks = dict(
         entry.split(":", 1) for entry in active_settings.plugin_project_container_networks
     )
@@ -2107,6 +2123,21 @@ def create_app(
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail="dynamic handler timed out",
+                ) from None
+            except PluginCapabilityError as exc:
+                _logger.warning(
+                    "dynamic_route capability_failed route_id=%s method=%s path=%s "
+                    "error_code=%s status_code=%s error=%s",
+                    record.route_id,
+                    request.method,
+                    path,
+                    exc.code,
+                    exc.status_code,
+                    str(exc),
+                )
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail=str(exc),
                 ) from None
             except HandlerContractError as exc:
                 message = _safe_handler_error(exc)

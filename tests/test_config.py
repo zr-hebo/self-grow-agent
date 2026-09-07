@@ -8,6 +8,7 @@ from config import Settings, load_settings
 
 MANAGEMENT_KEY = secrets.token_urlsafe(32)
 LLM_API_KEY = secrets.token_urlsafe(32)
+MYSQL_PASSWORD = secrets.token_urlsafe(32)
 SHORT_MANAGEMENT_KEY = secrets.token_urlsafe(6)
 
 SETTING_ENV_VARS = (
@@ -42,6 +43,8 @@ SETTING_ENV_VARS = (
     "PLUGIN_ARTIFACT_ROOT",
     "PLUGIN_ALLOWED_DEPENDENCIES",
     "PLUGIN_PROJECT_ENV_ALLOWLIST",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
     "PLUGIN_MAX_FILES",
     "PLUGIN_MAX_FILE_BYTES",
     "PLUGIN_MAX_TOTAL_BYTES",
@@ -91,6 +94,8 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
         "PLUGIN_ARTIFACT_ROOT": str(plugin_artifact_root),
         "PLUGIN_ALLOWED_DEPENDENCIES": "PyMySQL==1.1.1,httpx==0.28.1",
         "PLUGIN_PROJECT_ENV_ALLOWLIST": "store:MYSQL_USER,store:MYSQL_PASSWORD",
+        "MYSQL_USER": "visit_user",
+        "MYSQL_PASSWORD": MYSQL_PASSWORD,
         "PLUGIN_MAX_FILES": "24",
         "PLUGIN_MAX_FILE_BYTES": "131072",
         "PLUGIN_MAX_TOTAL_BYTES": "524288",
@@ -142,6 +147,9 @@ def test_load_settings_reads_environment(monkeypatch, tmp_path: Path) -> None:
         "store:MYSQL_USER",
         "store:MYSQL_PASSWORD",
     )
+    assert settings.mysql_user == "visit_user"
+    assert settings.mysql_password == MYSQL_PASSWORD
+    assert MYSQL_PASSWORD not in repr(settings)
     assert settings.plugin_max_files == 24
     assert settings.plugin_max_file_bytes == 131_072
     assert settings.plugin_max_total_bytes == 524_288
@@ -186,6 +194,8 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     assert settings.plugin_artifact_root == settings.generated_dir / "plugins"
     assert settings.plugin_allowed_dependencies == ()
     assert settings.plugin_project_env_allowlist == ()
+    assert settings.mysql_user == ""
+    assert settings.mysql_password == ""
     assert settings.plugin_max_files == 32
     assert settings.plugin_max_file_bytes == 262_144
     assert settings.plugin_max_total_bytes == 1_048_576
@@ -228,6 +238,9 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
         ("plugin_project_env_allowlist", ("store:MANAGEMENT_API_KEY",)),
         ("plugin_project_env_allowlist", ("Invalid:MYSQL_PASSWORD",)),
         ("plugin_project_env_allowlist", ("store:MYSQL_USER", "store:MYSQL_USER")),
+        ("mysql_user", " visit_user"),
+        ("mysql_user", "visit_user\x00"),
+        ("mysql_password", "secret\x00"),
         ("plugin_execution_backend", "unknown"),
         ("plugin_container_runtime", ""),
         ("plugin_container_image", "bad image"),

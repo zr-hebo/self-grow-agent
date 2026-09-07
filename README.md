@@ -40,6 +40,8 @@ uv run python main.py
 
 MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。告警 API 使用 `rebuild_replication_from_message`，由平台从 `request["body"]["raw-message"]` 提取并校验唯一的 `Instance: IPv4:port`；平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
+受控 capability 的输入错误、配置缺失和执行失败会分别以 HTTP `422`、`503`、`502` 及统一错误 response 返回，不会包装成 `code=0` 的成功结果；日志只显示缺失的环境变量名称和安全错误类别，不打印凭据值。
+
 服务默认监听 `127.0.0.1:8000`，入口会从 `config.py` 加载 `HOST` 和 `PORT`。动态业务处理器不依赖 Uvicorn 重启。
 启动后打开 [http://127.0.0.1:8000/console](http://127.0.0.1:8000/console)，输入本次启动使用的
 `MANAGEMENT_API_KEY`，即可通过图形界面完成需求开发和实现管理。密钥只保存在当前页面内存中。
@@ -214,6 +216,8 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `PLUGIN_ARTIFACT_ROOT` | `generated/plugins` | 验证通过后的不可变插件版本目录 |
 | `PLUGIN_ALLOWED_DEPENDENCIES` | 空 | 允许插件声明的精确依赖 pin，逗号分隔；依赖必须预装 |
 | `PLUGIN_PROJECT_ENV_ALLOWLIST` | 空 | `project:ENV_NAME` 列表；只向指定项目的业务插件进程注入，Agent/LLM 密钥禁止配置 |
+| `MYSQL_USER` | 空 | 受控 MySQL capability 使用的用户名；仅在项目 allowlist 授权后注入插件 |
+| `MYSQL_PASSWORD` | 空 | 受控 MySQL capability 使用的密码；仅在项目 allowlist 授权后注入插件，禁止写入日志 |
 | `GENERATED_DIR` | `generated` | 版本化处理器和清单目录 |
 | `METADATA_DB_PATH` | `generated/runtime-metadata.sqlite3` | 本地需求和实现事件 SQLite 数据库 |
 | `MAX_REQUEST_BODY_BYTES` | `1048576` | 动态业务请求体上限 |

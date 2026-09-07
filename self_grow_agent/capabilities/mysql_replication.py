@@ -8,6 +8,8 @@ import os
 import time
 from typing import Any
 
+from self_grow_agent.capabilities.errors import CapabilityError
+
 _LOGGER = logging.getLogger("self_grow_agent.capability.mysql_replication")
 _STATEMENTS = (
     ("stop_replica", "STOP REPLICA"),
@@ -39,11 +41,7 @@ def rebuild_replication_from_message(
             "reason=missing_ambiguous_or_invalid elapsed_seconds=%.3f",
             time.monotonic() - started_at,
         )
-        return {
-            "ok": False,
-            "error": "raw-message must contain exactly one valid Instance: ip:port line",
-            "attempts": 0,
-        }
+        raise CapabilityError("mysql_alert_instance_invalid")
     _LOGGER.info(
         "mysql_replication instance=%s step=parse_instance outcome=succeeded "
         "elapsed_seconds=%.3f",
@@ -64,21 +62,35 @@ def rebuild_replication(instance: str, *, retries: int = 2) -> dict[str, Any]:
     _validate_retries(retries)
     target = _parse_instance(instance)
     if target is None:
-        return {
-            "ok": False,
-            "error": "invalid MySQL instance; expected ip:port",
-            "attempts": 0,
-        }
+        _LOGGER.warning(
+            "mysql_replication step=validate_instance outcome=failed "
+            "reason=invalid_ip_or_port"
+        )
+        raise CapabilityError("mysql_instance_invalid")
     host, port = target
     normalized_instance = f"{host}:{port}"
+    _LOGGER.info(
+        "mysql_replication instance=%s step=validate_instance outcome=succeeded",
+        normalized_instance,
+    )
     user = os.environ.get("MYSQL_USER", "")
     password = os.environ.get("MYSQL_PASSWORD", "")
     if not user or not password:
-        return {
-            "ok": False,
-            "error": "MySQL capability credentials are not configured",
-            "attempts": 0,
-        }
+        missing = ",".join(
+            name
+            for name, value in (("MYSQL_USER", user), ("MYSQL_PASSWORD", password))
+            if not value
+        )
+        _LOGGER.warning(
+            "mysql_replication instance=%s step=credentials outcome=failed missing=%s",
+            normalized_instance,
+            missing,
+        )
+        raise CapabilityError("mysql_credentials_not_configured")
+    _LOGGER.info(
+        "mysql_replication instance=%s step=credentials outcome=succeeded",
+        normalized_instance,
+    )
 
     for attempt in range(1, retries + 2):
         connection: Any | None = None
@@ -122,13 +134,7 @@ def rebuild_replication(instance: str, *, retries: int = 2) -> dict[str, Any]:
                 time.monotonic() - attempt_started,
             )
             if attempt > retries:
-                return {
-                    "ok": False,
-                    "error": "MySQL replication operation failed",
-                    "instance": normalized_instance,
-                    "attempts": attempt,
-                    "failed_step": failed_step,
-                }
+                raise CapabilityError("mysql_replication_failed") from None
         finally:
             _close(cursor)
             _close(connection)
