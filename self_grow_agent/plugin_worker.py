@@ -9,7 +9,7 @@ import logging
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from self_grow_agent.capabilities.errors import (
     CapabilityError,
@@ -20,14 +20,16 @@ from self_grow_agent.plugin_runtime import verify_plugin_artifact
 
 _MAX_LOG_EVENTS = 64
 _MAX_LOG_MESSAGE_CHARS = 1_024
+_LOG_FRAME_PREFIX = b"SGA_PLUGIN_LOG "
 
 
 class _ProtocolLogHandler(logging.Handler):
     """Collect bounded plugin logs without writing on the JSON protocol streams."""
 
-    def __init__(self) -> None:
+    def __init__(self, stream: BinaryIO) -> None:
         super().__init__(level=logging.INFO)
         self.events: list[dict[str, str]] = []
+        self._stream = stream
 
     def emit(self, record: logging.LogRecord) -> None:
         if len(self.events) >= _MAX_LOG_EVENTS:
@@ -36,14 +38,28 @@ class _ProtocolLogHandler(logging.Handler):
             message = record.getMessage()
         except Exception:
             message = "plugin log message could not be formatted"
-        self.events.append(
-            {
-                "level": record.levelname
-                if record.levelname in {"INFO", "WARNING", "ERROR", "CRITICAL"}
-                else "INFO",
-                "message": message[:_MAX_LOG_MESSAGE_CHARS],
-            }
-        )
+        event = {
+            "level": record.levelname
+            if record.levelname in {"INFO", "WARNING", "ERROR", "CRITICAL"}
+            else "INFO",
+            "message": message[:_MAX_LOG_MESSAGE_CHARS],
+        }
+        self.events.append(event)
+        try:
+            self._stream.write(
+                _LOG_FRAME_PREFIX
+                + json.dumps(
+                    event,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            self._stream.flush()
+        except BaseException:
+            # The final JSON response still carries the bounded log buffer.
+            return
 
 
 class _DiscardText:
@@ -58,8 +74,9 @@ class _DiscardText:
 
 def main() -> int:
     protocol_output = sys.stdout.buffer
+    log_output = sys.stderr.buffer
     response: dict[str, Any]
-    log_handler = _ProtocolLogHandler()
+    log_handler = _ProtocolLogHandler(log_output)
     captured_capability_errors: list[str] = []
     try:
         artifact, digest, memory_text, cpu_text, result_limit_text = sys.argv[1:6]

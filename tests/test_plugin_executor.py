@@ -133,6 +133,31 @@ def test_times_out_and_reaps_plugin_process(tmp_path: Path) -> None:
         PluginProcessExecutor(timeout_seconds=0.2).execute(artifact, digest, {})
 
 
+def test_preserves_plugin_logs_emitted_before_timeout(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    artifact, digest = _artifact(
+        tmp_path,
+        "import logging\nimport time\n\n"
+        "def handle(request):\n"
+        "    logging.getLogger(__name__).info('step=connect outcome=started')\n"
+        "    time.sleep(10)\n",
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with pytest.raises(PluginTimeoutError, match="timed out"):
+        PluginProcessExecutor(timeout_seconds=0.2).execute(
+            artifact,
+            digest,
+            {"request_id": "request-123"},
+        )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "request_id=request-123" in logs
+    assert "step=connect outcome=started" in logs
+
+
 def test_rejects_oversized_result(tmp_path: Path) -> None:
     artifact, digest = _artifact(
         tmp_path,
@@ -220,16 +245,22 @@ def test_forwards_bounded_plugin_logs_and_redacts_sensitive_values(
 
     result = _executor(
         allowed_environment={"MYSQL_PASSWORD": environment_secret}
-    ).execute(artifact, digest, {"body": {"password": request_secret}})
+    ).execute(
+        artifact,
+        digest,
+        {"request_id": "request-456", "body": {"password": request_secret}},
+    )
 
     assert result == {"ok": True}
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert "plugin_handler event" in logs
+    assert "request_id=request-456" in logs
     assert "route_id=post-demo-run" in logs
     assert "instance=10.0.0.1:3306" in logs
     assert environment_secret not in logs
     assert request_secret not in logs
     assert "<redacted>" in logs
+    assert logs.count("instance=10.0.0.1:3306") == 1
 
 
 def test_rejects_tampered_artifact_before_execution(tmp_path: Path) -> None:

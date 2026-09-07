@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -38,6 +39,8 @@ _RESERVED_ENVIRONMENT = frozenset(
 _logger = logging.getLogger("uvicorn.error")
 _MAX_PLUGIN_LOG_EVENTS = 64
 _MAX_PLUGIN_LOG_MESSAGE_CHARS = 1_024
+_PLUGIN_LOG_FRAME_PREFIX = b"SGA_PLUGIN_LOG "
+_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _PLUGIN_LOG_CREDENTIAL = re.compile(
     r"(?P<name>(?:password|passwd|token|api[_ -]?key|secret|credential))"
     r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)",
@@ -138,6 +141,7 @@ class PluginProcessExecutor:
         """Verify and invoke one plugin artifact, returning JSON-compatible data."""
 
         started_at = time.monotonic()
+        request_id = _request_id(request)
         artifact = Path(artifact_path).expanduser().resolve()
         try:
             verify_plugin_artifact(artifact, artifact_digest)
@@ -146,6 +150,7 @@ class PluginProcessExecutor:
         try:
             worker_request = {
                 **request,
+                "request_id": request_id,
                 "runtime": {"environment": _public_environment(self._allowed_environment)},
             }
             encoded_request = json.dumps(
@@ -170,6 +175,19 @@ class PluginProcessExecutor:
         ]
         failure_stage: str | None = None
         with tempfile.TemporaryDirectory(prefix="self-grow-agent-plugin-run-") as home:
+            protocol_limit = max(
+                self._max_result_bytes
+                + (6 * _MAX_PLUGIN_LOG_EVENTS * _MAX_PLUGIN_LOG_MESSAGE_CHARS)
+                + 8192,
+                8192,
+            )
+            log_capture = _PluginLogCapture(
+                Path(home) / "worker-stderr.log",
+                artifact=artifact,
+                request_id=request_id,
+                redacted_values=_sensitive_values(request, self._allowed_environment),
+                byte_limit=protocol_limit,
+            )
             environment = {
                 "HOME": home,
                 "LANG": "C.UTF-8",
@@ -187,14 +205,16 @@ class PluginProcessExecutor:
                     env=environment,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=log_capture.writer,
                     start_new_session=True,
                 )
             except OSError:
+                log_capture.finish()
                 raise PluginProcessError("plugin worker could not start") from None
+            log_capture.start()
             try:
                 try:
-                    stdout, stderr = process.communicate(
+                    stdout, _ = process.communicate(
                         encoded_request,
                         timeout=self._timeout_seconds,
                     )
@@ -202,13 +222,9 @@ class PluginProcessExecutor:
                     failure_stage = "timeout"
                     _terminate_process_group(process)
                     process.communicate()
+                    log_capture.finish()
                     raise PluginTimeoutError("plugin handler timed out") from None
-                protocol_limit = max(
-                    self._max_result_bytes
-                    + (6 * _MAX_PLUGIN_LOG_EVENTS * _MAX_PLUGIN_LOG_MESSAGE_CHARS)
-                    + 8192,
-                    8192,
-                )
+                stderr = log_capture.finish()
                 if len(stdout) > protocol_limit or len(stderr) > protocol_limit:
                     failure_stage = "worker_output"
                     raise PluginProcessError("plugin worker output exceeded byte limit")
@@ -222,6 +238,8 @@ class PluginProcessExecutor:
                         artifact=artifact,
                         request=request,
                         allowed_environment=self._allowed_environment,
+                        request_id=request_id,
+                        skip_log_events=log_capture.emitted_count,
                     )
                 except PluginProcessError:
                     failure_stage = "protocol_or_handler"
@@ -229,12 +247,14 @@ class PluginProcessExecutor:
             finally:
                 if process.poll() is None:
                     _terminate_process_group(process)
+                log_capture.finish()
                 if failure_stage is not None:
                     _logger.warning(
-                        "plugin_handler_process failed stage=%s pid=%s exit_code=%s "
+                        "plugin_handler_process failed stage=%s request_id=%s pid=%s exit_code=%s "
                         "artifact_version=%s timeout_seconds=%.3f memory_limit_bytes=%s "
                         "cpu_limit_seconds=%s elapsed_seconds=%.3f",
                         failure_stage,
+                        request_id,
                         process.pid,
                         process.returncode,
                         artifact.name,
@@ -319,6 +339,7 @@ class ContainerPluginExecutor:
         """Verify and invoke one plugin in an isolated container."""
 
         started_at = time.monotonic()
+        request_id = _request_id(request)
         artifact = Path(artifact_path).expanduser().resolve()
         try:
             verify_plugin_artifact(artifact, artifact_digest)
@@ -328,6 +349,7 @@ class ContainerPluginExecutor:
             encoded_request = json.dumps(
                 {
                     **request,
+                    "request_id": request_id,
                     "runtime": {
                         "environment": _public_environment(self._allowed_environment)
                     },
@@ -404,6 +426,22 @@ class ContainerPluginExecutor:
                 environment[name] = os.environ[name]
         process: subprocess.Popen[bytes] | None = None
         failure_stage: str | None = None
+        protocol_limit = max(
+            self._max_result_bytes
+            + (6 * _MAX_PLUGIN_LOG_EVENTS * _MAX_PLUGIN_LOG_MESSAGE_CHARS)
+            + 8192,
+            8192,
+        )
+        log_directory = tempfile.TemporaryDirectory(
+            prefix="self-grow-agent-plugin-container-"
+        )
+        log_capture = _PluginLogCapture(
+            Path(log_directory.name) / "worker-stderr.log",
+            artifact=artifact,
+            request_id=request_id,
+            redacted_values=_sensitive_values(request, self._allowed_environment),
+            byte_limit=protocol_limit,
+        )
         try:
             try:
                 process = subprocess.Popen(
@@ -412,13 +450,15 @@ class ContainerPluginExecutor:
                     env=environment,
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=log_capture.writer,
                     start_new_session=True,
                 )
             except OSError:
+                log_capture.finish()
                 raise PluginProcessError("plugin container could not start") from None
+            log_capture.start()
             try:
-                stdout, stderr = process.communicate(
+                stdout, _ = process.communicate(
                     encoded_request, timeout=self._timeout_seconds
                 )
             except subprocess.TimeoutExpired:
@@ -426,21 +466,19 @@ class ContainerPluginExecutor:
                 _terminate_process_group(process)
                 _remove_container(self._runtime, container_name, environment)
                 process.communicate()
+                log_capture.finish()
                 raise PluginTimeoutError("plugin handler timed out") from None
-            protocol_limit = max(
-                self._max_result_bytes
-                + (6 * _MAX_PLUGIN_LOG_EVENTS * _MAX_PLUGIN_LOG_MESSAGE_CHARS)
-                + 8192,
-                8192,
-            )
+            stderr = log_capture.finish()
             if len(stdout) > protocol_limit or len(stderr) > protocol_limit:
                 failure_stage = "worker_output"
                 raise PluginProcessError("plugin worker output exceeded byte limit")
             if process.returncode != 0:
                 failure_stage = "container_exit"
                 _logger.warning(
-                    "plugin_handler_container runtime_error container_name=%s detail=%r",
+                    "plugin_handler_container runtime_error container_name=%s "
+                    "request_id=%s detail=%r",
                     container_name,
+                    request_id,
                     _redact_text(
                         stderr.decode("utf-8", errors="replace")[:2048],
                         frozenset(self._allowed_environment.values()),
@@ -454,6 +492,8 @@ class ContainerPluginExecutor:
                     artifact=artifact,
                     request=request,
                     allowed_environment=self._allowed_environment,
+                    request_id=request_id,
+                    skip_log_events=log_capture.emitted_count,
                 )
             except PluginProcessError:
                 failure_stage = "protocol_or_handler"
@@ -462,12 +502,15 @@ class ContainerPluginExecutor:
             if process is not None and process.poll() is None:
                 _terminate_process_group(process)
                 _remove_container(self._runtime, container_name, environment)
+            log_capture.finish()
+            log_directory.cleanup()
             if failure_stage is not None:
                 _logger.warning(
-                    "plugin_handler_container failed stage=%s container_name=%s "
+                    "plugin_handler_container failed stage=%s request_id=%s container_name=%s "
                     "exit_code=%s artifact_version=%s network=%s timeout_seconds=%.3f "
                     "memory_limit_bytes=%s cpu_limit_seconds=%s elapsed_seconds=%.3f",
                     failure_stage,
+                    request_id,
                     container_name,
                     process.returncode if process is not None else None,
                     artifact.name,
@@ -477,6 +520,96 @@ class ContainerPluginExecutor:
                     self._cpu_limit_seconds,
                     time.monotonic() - started_at,
                 )
+
+
+class _PluginLogCapture:
+    """Tail worker log frames so progress survives a timeout or forced exit."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        artifact: Path,
+        request_id: str,
+        redacted_values: frozenset[str],
+        byte_limit: int,
+    ) -> None:
+        self.writer = path.open("wb")
+        self._path = path
+        self._artifact = artifact
+        self._request_id = request_id
+        self._redacted_values = redacted_values
+        self._byte_limit = byte_limit
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stderr = bytearray()
+        self.emitted_count = 0
+
+    def start(self) -> None:
+        self.writer.close()
+        self._thread = threading.Thread(
+            target=self._tail,
+            name="plugin-log-capture",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def finish(self) -> bytes:
+        if not self.writer.closed:
+            self.writer.close()
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+            self._thread = None
+        return bytes(self._stderr)
+
+    def _tail(self) -> None:
+        try:
+            with self._path.open("rb") as stream:
+                while True:
+                    line = stream.readline()
+                    if line:
+                        remaining = self._byte_limit + 1 - len(self._stderr)
+                        if remaining > 0:
+                            self._stderr.extend(line[:remaining])
+                        self._emit_frame(line)
+                        continue
+                    if self._stop.wait(0.01):
+                        # The worker has exited; drain bytes written just before exit.
+                        trailing = stream.read()
+                        if trailing:
+                            remaining = self._byte_limit + 1 - len(self._stderr)
+                            if remaining > 0:
+                                self._stderr.extend(trailing[:remaining])
+                            for trailing_line in trailing.splitlines(keepends=True):
+                                self._emit_frame(trailing_line)
+                        return
+        except OSError:
+            return
+
+    def _emit_frame(self, line: bytes) -> None:
+        if not line.startswith(_PLUGIN_LOG_FRAME_PREFIX):
+            return
+        try:
+            event = json.loads(line[len(_PLUGIN_LOG_FRAME_PREFIX) :])
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return
+        if not _valid_plugin_logs([event]):
+            return
+        _emit_plugin_logs(
+            [event],
+            artifact=self._artifact,
+            redacted_values=self._redacted_values,
+            request_id=self._request_id,
+        )
+        self.emitted_count += 1
+
+
+def _request_id(request: Mapping[str, Any]) -> str:
+    value = request.get("request_id")
+    if isinstance(value, str) and _REQUEST_ID.fullmatch(value) is not None:
+        return value
+    return uuid.uuid4().hex
 
 
 def _public_environment(environment: Mapping[str, str]) -> dict[str, str]:
@@ -504,6 +637,8 @@ def _decode_worker_response(
     artifact: Path,
     request: Mapping[str, Any],
     allowed_environment: Mapping[str, str],
+    request_id: str,
+    skip_log_events: int = 0,
 ) -> Any:
     del stderr
     try:
@@ -520,9 +655,10 @@ def _decode_worker_response(
     if not _valid_plugin_logs(logs):
         raise PluginProcessError("plugin worker returned invalid response")
     _emit_plugin_logs(
-        logs,
+        logs[skip_log_events:],
         artifact=artifact,
         redacted_values=_sensitive_values(request, allowed_environment),
+        request_id=request_id,
     )
     if response["status"] == "capability_error":
         if set(response) != {"status", "error_code", "logs"}:
@@ -592,7 +728,11 @@ def _sensitive_values(
 
 
 def _emit_plugin_logs(
-    events: list[dict[str, str]], *, artifact: Path, redacted_values: frozenset[str]
+    events: list[dict[str, str]],
+    *,
+    artifact: Path,
+    redacted_values: frozenset[str],
+    request_id: str,
 ) -> None:
     for event in events:
         message = _redact_text(event["message"], redacted_values)
@@ -604,10 +744,11 @@ def _emit_plugin_logs(
         }[event["level"]]
         log_method(
             "plugin_handler event project=%s route_id=%s artifact_version=%s "
-            "level=%s message=%r",
+            "request_id=%s level=%s message=%r",
             artifact.parent.parent.name,
             artifact.parent.name,
             artifact.name,
+            request_id,
             event["level"],
             message,
         )

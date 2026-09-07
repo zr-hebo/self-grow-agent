@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import secrets
 import threading
 import time
@@ -1117,6 +1118,7 @@ def test_dynamic_route_logs_query_and_json_body(
     )
     assert 'query={"request_id":"req-1"}' in dynamic_logs
     assert 'body={"name":"Tom"}' in dynamic_logs
+    assert re.search(r"request_id=[0-9a-f]{32}", dynamic_logs)
 
 
 def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:

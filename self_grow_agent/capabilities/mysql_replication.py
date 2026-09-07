@@ -5,7 +5,9 @@ from __future__ import annotations
 import ipaddress
 import logging
 import os
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from self_grow_agent.capabilities.errors import CapabilityError
@@ -17,6 +19,8 @@ _STATEMENTS = (
 )
 _MAX_RETRIES = 2
 _MAX_INSTANCES_PER_MESSAGE = 16
+_MAX_BATCH_WORKERS = 4
+_ALERT_STATE = re.compile(r"^\[(active|resolved)\]", flags=re.IGNORECASE)
 
 
 def rebuild_replication_from_message(
@@ -47,6 +51,18 @@ def rebuild_replication_from_message(
             time.monotonic() - started_at,
         )
         raise CapabilityError("mysql_alert_instance_invalid")
+    if not instances:
+        _LOGGER.info(
+            "mysql_replication step=parse_instance outcome=skipped "
+            "reason=alert_resolved elapsed_seconds=%.3f",
+            time.monotonic() - started_at,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "alert is resolved",
+            "instance_count": 0,
+        }
     _LOGGER.info(
         "mysql_replication step=parse_instance outcome=succeeded instance_count=%s "
         "elapsed_seconds=%.3f",
@@ -61,37 +77,32 @@ def rebuild_replication_from_message(
     if len(instances) == 1:
         return rebuild_replication(instances[0], retries=retries)
 
-    results: list[dict[str, Any]] = []
-    for index, instance in enumerate(instances, start=1):
-        instance_started = time.monotonic()
-        _LOGGER.info(
-            "mysql_replication instance=%s step=batch_instance instance_index=%s "
-            "instance_count=%s outcome=started",
-            instance,
-            index,
-            len(instances),
-        )
-        try:
-            result = rebuild_replication(instance, retries=retries)
-        except CapabilityError:
-            _LOGGER.warning(
-                "mysql_replication instance=%s step=batch_instance instance_index=%s "
-                "instance_count=%s outcome=failed elapsed_seconds=%.3f",
+    worker_count = min(_MAX_BATCH_WORKERS, len(instances))
+    _LOGGER.info(
+        "mysql_replication step=batch outcome=started instance_count=%s "
+        "max_concurrency=%s",
+        len(instances),
+        worker_count,
+    )
+    with ThreadPoolExecutor(
+        max_workers=worker_count,
+        thread_name_prefix="mysql-replication",
+    ) as executor:
+        futures = [
+            executor.submit(
+                _rebuild_batch_instance,
                 instance,
                 index,
                 len(instances),
-                time.monotonic() - instance_started,
+                retries,
             )
-            raise
-        results.append(result)
-        _LOGGER.info(
-            "mysql_replication instance=%s step=batch_instance instance_index=%s "
-            "instance_count=%s outcome=succeeded elapsed_seconds=%.3f",
-            instance,
-            index,
-            len(instances),
-            time.monotonic() - instance_started,
-        )
+            for index, instance in enumerate(instances, start=1)
+        ]
+        results = [future.result() for future in futures]
+    _LOGGER.info(
+        "mysql_replication step=batch outcome=succeeded instance_count=%s",
+        len(instances),
+    )
     return {
         "ok": True,
         "instance_count": len(instances),
@@ -218,12 +229,30 @@ def _validate_retries(retries: object) -> None:
 def _instances_from_message(raw_message: object) -> tuple[str, ...] | None:
     if not isinstance(raw_message, str):
         return None
-    candidates: list[str] = []
+    candidates_with_state: list[tuple[str | None, str]] = []
+    current_state: str | None = None
+    active_markers = 0
+    resolved_markers = 0
     for line in raw_message.splitlines():
+        state_match = _ALERT_STATE.match(line.strip())
+        if state_match is not None:
+            current_state = state_match.group(1).casefold()
+            if current_state == "active":
+                active_markers += 1
+            else:
+                resolved_markers += 1
         label, separator, value = line.partition(":")
         if separator and label.strip().casefold() == "instance":
-            candidates.append(value.strip())
+            candidates_with_state.append((current_state, value.strip()))
+    has_lifecycle_markers = active_markers > 0 or resolved_markers > 0
+    candidates = [
+        value
+        for state, value in candidates_with_state
+        if not has_lifecycle_markers or state == "active"
+    ]
     if not candidates:
+        if resolved_markers > 0 and active_markers == 0:
+            return ()
         return None
     instances: list[str] = []
     seen: set[str] = set()
@@ -240,6 +269,43 @@ def _instances_from_message(raw_message: object) -> tuple[str, ...] | None:
         if len(instances) > _MAX_INSTANCES_PER_MESSAGE:
             return None
     return tuple(instances)
+
+
+def _rebuild_batch_instance(
+    instance: str,
+    index: int,
+    instance_count: int,
+    retries: int,
+) -> dict[str, Any]:
+    instance_started = time.monotonic()
+    _LOGGER.info(
+        "mysql_replication instance=%s step=batch_instance instance_index=%s "
+        "instance_count=%s outcome=started",
+        instance,
+        index,
+        instance_count,
+    )
+    try:
+        result = rebuild_replication(instance, retries=retries)
+    except CapabilityError:
+        _LOGGER.warning(
+            "mysql_replication instance=%s step=batch_instance instance_index=%s "
+            "instance_count=%s outcome=failed elapsed_seconds=%.3f",
+            instance,
+            index,
+            instance_count,
+            time.monotonic() - instance_started,
+        )
+        raise
+    _LOGGER.info(
+        "mysql_replication instance=%s step=batch_instance instance_index=%s "
+        "instance_count=%s outcome=succeeded elapsed_seconds=%.3f",
+        instance,
+        index,
+        instance_count,
+        time.monotonic() - instance_started,
+    )
+    return result
 
 
 def _connect(**kwargs: Any) -> Any:

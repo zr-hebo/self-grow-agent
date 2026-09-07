@@ -532,7 +532,7 @@ export PLUGIN_PROJECT_ENV_ALLOWLIST='binlog-server:MYSQL_USER,binlog-server:MYSQ
 
 `MANAGEMENT_API_KEY`、`LLM_API_KEY`、`DEEPSEEK_API_KEY`、Python loader 变量等不能加入该白名单。允许变量会注入指定项目的隔离进程，但名称包含 `password`、`token`、`api_key`、`secret` 或 `credential` 的敏感值不会复制到 `request["runtime"]["environment"]`；MySQL capability 直接从隔离进程环境消费密码。所有允许值都不会进入生成 prompt、测试进程或 HTTP 请求日志。可声明的普通第三方依赖必须同时满足：精确 `name==version`、位于 `PLUGIN_ALLOWED_DEPENDENCIES`、已经安装在运行环境中；数据库驱动依赖及其 import 即使出现在允许列表中也会被 AST 门禁拒绝，MySQL Connector 由平台 capability 独占。
 
-对于告警消息，生成的 handler 从 `request["body"]["raw-message"]` 取出原始字符串后调用 `rebuild_replication_from_message`。一个聚合消息可以包含多个 `Instance: IPv4:port` 行；平台负责提取、校验和去重，按出现顺序处理最多 16 个唯一实例，避免 LLM 自行生成的正则与真实请求格式不一致。单实例响应保持原结构；多实例成功时返回 `instance_count` 和逐实例 `results`。受控 MySQL capability 只执行固定的 `STOP REPLICA`、`START REPLICA`，每个实例最多允许 2 次重试，并对解析、连接、停止、启动、失败步骤和耗时记录结构化日志。批处理中任一实例最终失败时会停止后续处理并返回安全的非 2xx capability 错误；已经成功的前序实例不会回滚。它不接受 SQL 参数，也不会把完整告警、驱动原始异常或密码返回给调用方。运行账号只需 MySQL 的 `REPLICATION_SLAVE_ADMIN` 动态权限；不要授予 DDL/DML 权限。
+对于告警消息，生成的 handler 从 `request["body"]["raw-message"]` 取出原始字符串后调用 `rebuild_replication_from_message`。一个聚合消息可以包含多个 `Instance: IPv4:port` 行；平台负责按告警块识别 `[active]` 和 `[resolved]`，只对 active 实例执行操作，纯 resolved 消息返回 `skipped=true`。实例会被校验和去重，单次最多 16 个唯一实例，最多 4 路并发执行，返回的 `results` 仍保持原出现顺序。单实例响应保持原结构；多实例成功时返回 `instance_count` 和逐实例 `results`。受控 MySQL capability 只执行固定的 `STOP REPLICA`、`START REPLICA`，每个实例最多允许 2 次重试，并对解析、连接、停止、启动、失败步骤和耗时记录结构化日志。批处理中任一实例最终失败时，等待已提交的同批任务完成后返回安全的非 2xx capability 错误；已经成功的实例不会回滚。它不接受 SQL 参数，也不会把完整告警、驱动原始异常或密码返回给调用方。运行账号只需 MySQL 的 `REPLICATION_SLAVE_ADMIN` 动态权限；不要授予 DDL/DML 权限。
 
 Capability 失败不会作为普通 handler 数据返回：告警或实例参数无效返回 HTTP `422`，插件进程没有拿到 MySQL 凭据返回 HTTP `503`，连接或固定命令重试后仍失败返回 HTTP `502`。三种情况都使用统一的 `{"code":非零,"message":"安全错误原因","data":null}` 结构，并在日志中记录失败步骤；不会再出现 `HTTP 200`、`code=0` 但 `data.ok=false` 的伪成功响应。
 
@@ -562,7 +562,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes/<route-id>/rollback" \
 
 控制台也可选择“完整插件”、查看模式/制品摘要，并对插件执行“回滚上一版”。核心平台自身（FastAPI 管理路由、策略和执行器）的修改仍需正常代码发布与服务重启，动态插件只能扩展业务 API。
 
-插件需要记录连接、校验、重试或 SQL 步骤时，应使用标准库 `logging`，不要使用 `print`。worker 会把最多 64 条、每条最多 1024 字符的 `INFO` 及以上日志通过受控协议交给父服务；服务统一记录 `plugin_handler event`，并附带 project、route ID、制品版本和日志级别。项目白名单环境值以及请求中 `password`、`token`、`api_key`、`secret` 等字段值会在父进程再次脱敏。插件仍不得主动记录或返回密码；超出数量的日志会丢弃，过大的协议输出会使本次业务调用安全失败。
+插件需要记录连接、校验、重试或 SQL 步骤时，应使用标准库 `logging`，不要使用 `print`。worker 会把最多 64 条、每条最多 1024 字符的 `INFO` 及以上日志实时交给父服务；即使处理超时或子进程被终止，超时前已发出的日志仍会保留。服务统一记录 `plugin_handler event`，并附带 project、route ID、制品版本、日志级别和该次业务调用的 `request_id`，可以用同一 ID 关联 `dynamic_route request`、步骤日志和最终错误。项目白名单环境值以及请求中 `password`、`token`、`api_key`、`secret` 等字段值会在父进程再次脱敏。插件仍不得主动记录或返回密码；超出数量的日志会丢弃，过大的协议输出会使本次业务调用安全失败。
 
 ## Agent 如何自动生成并发布功能
 

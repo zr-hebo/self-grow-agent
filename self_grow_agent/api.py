@@ -2081,15 +2081,19 @@ def create_app(
 
         execution: asyncio.Future[Any] | None = None
         try:
+            request_id = uuid.uuid4().hex
             context = await _build_request_context(
                 request,
                 max_body_bytes=active_settings.max_request_body_bytes,
             )
+            context["request_id"] = request_id
             _logger.info(
-                "dynamic_route request route_id=%s method=%s path=%s query=%s body=%s",
+                "dynamic_route request route_id=%s method=%s path=%s request_id=%s "
+                "query=%s body=%s",
                 record.route_id,
                 request.method,
                 path,
+                request_id,
                 _request_parameters_for_log(context["query"]),
                 _request_parameters_for_log(context["body"]),
             )
@@ -2120,6 +2124,13 @@ def create_app(
                 execution.add_done_callback(release_handler_slot)
                 return _api_success(await asyncio.shield(execution))
             except (HandlerTimeoutError, PluginTimeoutError):
+                _logger.warning(
+                    "dynamic_route timeout request_id=%s route_id=%s method=%s path=%s",
+                    request_id,
+                    record.route_id,
+                    request.method,
+                    path,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail="dynamic handler timed out",
@@ -2127,10 +2138,12 @@ def create_app(
             except PluginCapabilityError as exc:
                 _logger.warning(
                     "dynamic_route capability_failed route_id=%s method=%s path=%s "
+                    "request_id=%s "
                     "error_code=%s status_code=%s error=%s",
                     record.route_id,
                     request.method,
                     path,
+                    request_id,
                     exc.code,
                     exc.status_code,
                     str(exc),
@@ -2142,10 +2155,12 @@ def create_app(
             except HandlerContractError as exc:
                 message = _safe_handler_error(exc)
                 _logger.warning(
-                    "dynamic_route failed route_id=%s method=%s path=%s error=%s",
+                    "dynamic_route failed route_id=%s method=%s path=%s "
+                    "request_id=%s error=%s",
                     record.route_id,
                     request.method,
                     path,
+                    request_id,
                     message,
                 )
                 raise HTTPException(
@@ -2155,10 +2170,12 @@ def create_app(
             except (HandlerProcessError, PluginProcessError) as exc:
                 message = _safe_handler_error(exc)
                 _logger.warning(
-                    "dynamic_route failed route_id=%s method=%s path=%s error=%s",
+                    "dynamic_route failed route_id=%s method=%s path=%s "
+                    "request_id=%s error=%s",
                     record.route_id,
                     request.method,
                     path,
+                    request_id,
                     message,
                 )
                 raise HTTPException(
@@ -2166,6 +2183,14 @@ def create_app(
                     detail=message,
                 ) from None
             except Exception:
+                _logger.exception(
+                    "dynamic_route failed route_id=%s method=%s path=%s "
+                    "request_id=%s error=unexpected_platform_error",
+                    record.route_id,
+                    request.method,
+                    path,
+                    request_id,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="dynamic handler failed",

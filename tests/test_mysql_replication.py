@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import secrets
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -217,10 +219,10 @@ Instance: 10.159.21.16:6606
             },
         ],
     }
-    assert [instance for instance, _ in connections] == [
+    assert sorted(instance for instance, _ in connections) == sorted([
         "10.159.21.16:6606",
         "10.241.147.122:6606",
-    ]
+    ])
     assert all(connection.closed for _, connection in connections)
     assert all(
         connection._cursor.statements == ["STOP REPLICA", "START REPLICA"]
@@ -230,6 +232,96 @@ Instance: 10.159.21.16:6606
     assert "step=parse_instance outcome=succeeded instance_count=2" in log_text
     assert "step=batch_instance instance_index=1 instance_count=2 outcome=started" in log_text
     assert "step=batch_instance instance_index=2 instance_count=2 outcome=succeeded" in log_text
+
+
+def test_processes_aggregated_instances_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_message = "\n".join(
+        f"[active][error]\nInstance: 10.0.0.{index}:3306"
+        for index in range(1, 5)
+    )
+    lock = threading.Lock()
+    active_connections = 0
+    max_active_connections = 0
+
+    def connect(**kwargs: Any) -> FakeConnection:
+        nonlocal active_connections, max_active_connections
+        with lock:
+            active_connections += 1
+            max_active_connections = max(max_active_connections, active_connections)
+        try:
+            time.sleep(0.05)
+            return FakeConnection(FakeCursor())
+        finally:
+            with lock:
+                active_connections -= 1
+
+    monkeypatch.setattr(mysql_replication, "_connect", connect)
+    monkeypatch.setenv("MYSQL_USER", "replication-operator")
+    monkeypatch.setenv("MYSQL_PASSWORD", secrets.token_urlsafe(24))
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result["instance_count"] == 4
+    assert [item["instance"] for item in result["results"]] == [
+        f"10.0.0.{index}:3306" for index in range(1, 5)
+    ]
+    assert 1 < max_active_connections <= 4
+
+
+def test_resolved_alert_is_skipped_without_connecting(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_message = """\
+[resolved][error] 2:52PM
+Message:Event : Binlog Server 事务推进已恢复
+Instance: 10.0.0.1:3306
+"""
+    monkeypatch.setattr(
+        mysql_replication,
+        "_connect",
+        lambda **kwargs: pytest.fail(f"unexpected connect: {kwargs}"),
+    )
+    caplog.set_level(logging.INFO, logger="self_grow_agent.capability.mysql_replication")
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result == {
+        "ok": True,
+        "skipped": True,
+        "reason": "alert is resolved",
+        "instance_count": 0,
+    }
+    assert "outcome=skipped reason=alert_resolved" in "\n".join(
+        record.getMessage() for record in caplog.records
+    )
+
+
+def test_mixed_alert_processes_only_active_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_message = """\
+[resolved][error]
+Instance: 10.0.0.1:3306
+[active][error]
+Instance: 10.0.0.2:3306
+"""
+    connected: list[str] = []
+
+    def connect(**kwargs: Any) -> FakeConnection:
+        connected.append(f"{kwargs['host']}:{kwargs['port']}")
+        return FakeConnection(FakeCursor())
+
+    monkeypatch.setattr(mysql_replication, "_connect", connect)
+    monkeypatch.setenv("MYSQL_USER", "replication-operator")
+    monkeypatch.setenv("MYSQL_PASSWORD", secrets.token_urlsafe(24))
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result["instance"] == "10.0.0.2:3306"
+    assert connected == ["10.0.0.2:3306"]
 
 
 @pytest.mark.parametrize(

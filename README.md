@@ -38,7 +38,7 @@ uv run python main.py
 
 默认生成链路是 `execution_mode=plugin` + `GENERATION_BACKEND=pi`，会生成带普通 import、多文件和测试的完整 API 插件；请求无需重复传 `execution_mode`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。若只需要旧版单文件受限处理器，可同时设置 `GENERATION_BACKEND=direct` 并在管理请求中显式传 `"execution_mode":"restricted"`。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
 
-MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。告警 API 使用 `rebuild_replication_from_message`，由平台从 `request["body"]["raw-message"]` 提取、校验并去重一个或多个 `Instance: IPv4:port`，单次最多处理 16 个唯一实例；平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
+MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。告警 API 使用 `rebuild_replication_from_message`，由平台从 `request["body"]["raw-message"]` 提取、校验并去重一个或多个 `Instance: IPv4:port`，单次最多处理 16 个唯一实例，最多 4 路并发执行；只处理 `[active]` 告警，`[resolved]` 告警会安全跳过。平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
 受控 capability 的输入错误、配置缺失和执行失败会分别以 HTTP `422`、`503`、`502` 及统一错误 response 返回，不会包装成 `code=0` 的成功结果；日志只显示缺失的环境变量名称和安全错误类别，不打印凭据值。
 
