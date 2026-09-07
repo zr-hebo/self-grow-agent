@@ -53,16 +53,27 @@ Plugin requirements:
 - Include `handler.py` defining synchronous `def handle(request):`.
 - Include at least one `tests/test_*.py` file.
 - Return JSON-compatible data from the handler.
+- `request` is the platform envelope with `method`, `path`, `query`, `headers`,
+  `body`, and `runtime` keys. JSON POST/PUT/PATCH parameters are nested under
+  `request["body"]`; they are not top-level request keys.
+- Preserve JSON field names exactly, including hyphens. For a `raw-message` input,
+  read `request["body"]["raw-message"]`, not `raw_message` or a top-level field.
+- Tests must invoke `handle` with this complete platform request envelope and cover
+  representative input from the task data instead of using an empty request only.
 - Use only the dependency pins listed in ALLOWED_DEPENDENCIES below.
 - Never embed passwords, API keys, tokens, cookies, or other credentials.
 - Do not read process environment variables in generated code.
 - Explicit per-project runtime values, when configured, are available only as the
   mapping `request["runtime"]["environment"]`; secret values are withheld.
-- For MySQL replication operations, import only
-  `rebuild_replication` from `self_grow_agent.capabilities.mysql_replication` and pass
-  it a validated `ip:port`. Do not import database drivers, declare database-driver
-  dependencies, accept SQL text, or construct SQL statements. The controlled
-  capability owns credentials, fixed statements, retries, and step logs.
+- For MySQL replication operations driven by `raw-message`, import only
+  `rebuild_replication_from_message` from
+  `self_grow_agent.capabilities.mysql_replication`, pass it the unmodified
+  `request["body"]["raw-message"]`, and return its result. For an API that already
+  receives a validated `ip:port`, `rebuild_replication` is also allowed. Do not import
+  database drivers, declare database-driver dependencies, parse the Instance line in
+  generated code, accept SQL text, or construct SQL statements. The controlled
+  capability owns parsing, validation, credentials, fixed statements, retries, and
+  step logs.
 - Use Python's standard `logging` module for requested operational step logs. Never
   use print for logs, and never log credentials or complete sensitive payloads.
 - Do not use shell commands, subprocesses, dynamic imports, eval, exec, pickle, ctypes,

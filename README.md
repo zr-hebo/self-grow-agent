@@ -38,7 +38,7 @@ uv run python main.py
 
 默认生成链路是 `execution_mode=plugin` + `GENERATION_BACKEND=pi`，会生成带普通 import、多文件和测试的完整 API 插件；请求无需重复传 `execution_mode`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。若只需要旧版单文件受限处理器，可同时设置 `GENERATION_BACKEND=direct` 并在管理请求中显式传 `"execution_mode":"restricted"`。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
 
-MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
+MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。告警 API 使用 `rebuild_replication_from_message`，由平台从 `request["body"]["raw-message"]` 提取并校验唯一的 `Instance: IPv4:port`；平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
 服务默认监听 `127.0.0.1:8000`，入口会从 `config.py` 加载 `HOST` 和 `PORT`。动态业务处理器不依赖 Uvicorn 重启。
 启动后打开 [http://127.0.0.1:8000/console](http://127.0.0.1:8000/console)，输入本次启动使用的

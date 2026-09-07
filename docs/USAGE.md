@@ -514,7 +514,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "path":"/rebuild_replication",
     "method":"POST",
     "project":"binlog-server",
-    "instruction":"从 JSON body.raw-message 提取并严格校验 Instance ip:port；只调用 self_grow_agent.capabilities.mysql_replication.rebuild_replication，不要 import 数据库驱动、不要生成或接收 SQL、不要读取或返回凭据；提供提取逻辑的单元测试。"
+    "instruction":"从 request[\"body\"][\"raw-message\"] 读取完整告警消息；只调用 self_grow_agent.capabilities.mysql_replication.rebuild_replication_from_message，不要在生成代码中自行解析 Instance、不要 import 数据库驱动、不要生成或接收 SQL、不要读取或返回凭据；测试必须使用包含 Instance: 10.159.21.16:6606 的完整 request body。"
   }'
 ```
 
@@ -530,7 +530,7 @@ export PLUGIN_PROJECT_ENV_ALLOWLIST='binlog-server:MYSQL_USER,binlog-server:MYSQ
 
 `MANAGEMENT_API_KEY`、`LLM_API_KEY`、`DEEPSEEK_API_KEY`、Python loader 变量等不能加入该白名单。允许变量会注入指定项目的隔离进程，但名称包含 `password`、`token`、`api_key`、`secret` 或 `credential` 的敏感值不会复制到 `request["runtime"]["environment"]`；MySQL capability 直接从隔离进程环境消费密码。所有允许值都不会进入生成 prompt、测试进程或 HTTP 请求日志。可声明的普通第三方依赖必须同时满足：精确 `name==version`、位于 `PLUGIN_ALLOWED_DEPENDENCIES`、已经安装在运行环境中；数据库驱动依赖及其 import 即使出现在允许列表中也会被 AST 门禁拒绝，MySQL Connector 由平台 capability 独占。
 
-受控 MySQL capability 只接受 `IPv4:port`，只执行固定的 `STOP REPLICA`、`START REPLICA`，最多允许 2 次重试，并对连接、停止、启动、失败步骤和耗时记录结构化日志。它不接受 SQL 参数，也不会把驱动原始异常或密码返回给调用方。运行账号只需 MySQL 的 `REPLICATION_SLAVE_ADMIN` 动态权限；不要授予 DDL/DML 权限。
+对于告警消息，生成的 handler 从 `request["body"]["raw-message"]` 取出原始字符串后调用 `rebuild_replication_from_message`。Instance 行的提取、唯一性检查和 `IPv4:port` 校验均由平台完成，避免 LLM 自行生成的正则与真实请求格式不一致。受控 MySQL capability 只执行固定的 `STOP REPLICA`、`START REPLICA`，最多允许 2 次重试，并对解析、连接、停止、启动、失败步骤和耗时记录结构化日志。它不接受 SQL 参数，也不会把完整告警、驱动原始异常或密码返回给调用方。运行账号只需 MySQL 的 `REPLICATION_SLAVE_ADMIN` 动态权限；不要授予 DDL/DML 权限。
 
 ### Docker 强隔离执行
 

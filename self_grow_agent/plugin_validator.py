@@ -88,6 +88,9 @@ _DATABASE_DRIVER_DISTRIBUTIONS = frozenset(
     }
 )
 _CONTROLLED_CAPABILITY_MODULE = "self_grow_agent.capabilities.mysql_replication"
+_CONTROLLED_CAPABILITY_FUNCTIONS = frozenset(
+    {"rebuild_replication", "rebuild_replication_from_message"}
+)
 
 
 class PluginValidationError(ValueError):
@@ -165,11 +168,12 @@ def _validate_tree(
                 raise PluginValidationError("plugin import is invalid")
             _validate_controlled_import(node.module, filename, from_import=True)
             if node.module == _CONTROLLED_CAPABILITY_MODULE and any(
-                alias.name != "rebuild_replication" or alias.asname is not None
+                alias.name not in _CONTROLLED_CAPABILITY_FUNCTIONS
+                or alias.asname is not None
                 for alias in node.names
             ):
                 raise PluginValidationError(
-                    "plugin may import only rebuild_replication from the controlled capability"
+                    "plugin imports an unsupported controlled capability function"
                 )
             root = node.module.partition(".")[0]
             _validate_import(root, filename, declared_modules)

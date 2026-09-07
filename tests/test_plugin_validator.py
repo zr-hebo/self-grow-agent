@@ -44,6 +44,20 @@ def test_accepts_controlled_mysql_replication_capability() -> None:
     assert result.imported_modules == ("self_grow_agent",)
 
 
+def test_accepts_controlled_mysql_alert_message_capability() -> None:
+    plugin = _plugin(
+        "from self_grow_agent.capabilities.mysql_replication "
+        "import rebuild_replication_from_message\n\n"
+        "def handle(request):\n"
+        "    return rebuild_replication_from_message("
+        "request['body']['raw-message'])\n",
+    )
+
+    result = _validator().validate(plugin)
+
+    assert result.imported_modules == ("self_grow_agent",)
+
+
 @pytest.mark.parametrize(
     ("handler", "dependency"),
     [

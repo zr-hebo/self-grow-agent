@@ -130,6 +130,65 @@ def test_missing_credentials_returns_safe_error(monkeypatch: pytest.MonkeyPatch)
     }
 
 
+def test_extracts_instance_from_real_alert_message_and_runs_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw_message = """\
+[active][error] 11:10AM
+Name:ShopeeBinlogServer_Transactions_Total_Zero
+Deploy: live
+Message:Event : Binlog Server 事务未推进
+AZ : ap-sg-1-general-b
+Instance: 10.159.21.16:6606
+Binlog Server UUID : 3eeb368b48a7f433
+RDS Cluster UUID : ab95fc1a268dffc8
+"""
+    cursor = FakeCursor()
+    connection = FakeConnection(cursor)
+    monkeypatch.setattr(mysql_replication, "_connect", lambda **kwargs: connection)
+    monkeypatch.setenv("MYSQL_USER", "replication-operator")
+    monkeypatch.setenv("MYSQL_PASSWORD", secrets.token_urlsafe(24))
+    caplog.set_level(logging.INFO, logger="self_grow_agent.capability.mysql_replication")
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result["ok"] is True
+    assert result["instance"] == "10.159.21.16:6606"
+    assert cursor.statements == ["STOP REPLICA", "START REPLICA"]
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "step=parse_instance outcome=started" in log_text
+    assert "instance=10.159.21.16:6606 step=parse_instance outcome=succeeded" in log_text
+
+
+@pytest.mark.parametrize(
+    "raw_message",
+    [
+        None,
+        "no instance here",
+        "Instance: db.internal:3306",
+        "Instance: 10.0.0.1:3306\nInstance: 10.0.0.2:3306",
+    ],
+)
+def test_rejects_missing_invalid_or_ambiguous_instance_in_message(
+    raw_message: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        mysql_replication,
+        "_connect",
+        lambda **kwargs: pytest.fail(f"unexpected connect: {kwargs}"),
+    )
+
+    result = mysql_replication.rebuild_replication_from_message(raw_message)
+
+    assert result == {
+        "ok": False,
+        "error": "raw-message must contain exactly one valid Instance: ip:port line",
+        "attempts": 0,
+    }
+
+
 def test_retries_twice_and_never_logs_driver_error_or_password(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -178,4 +237,8 @@ def test_rejects_retry_count_outside_policy(retries: object) -> None:
     with pytest.raises(ValueError, match="retries must be an integer between 0 and 2"):
         mysql_replication.rebuild_replication(
             "127.0.0.1:3306", retries=retries  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="retries must be an integer between 0 and 2"):
+        mysql_replication.rebuild_replication_from_message(
+            "Instance: 127.0.0.1:3306", retries=retries  # type: ignore[arg-type]
         )

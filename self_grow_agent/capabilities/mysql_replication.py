@@ -16,6 +16,43 @@ _STATEMENTS = (
 _MAX_RETRIES = 2
 
 
+def rebuild_replication_from_message(
+    raw_message: object, *, retries: int = 2
+) -> dict[str, Any]:
+    """Extract one instance from an alert message and restart its replication.
+
+    Generated handlers should use this entry point for ``raw-message`` requests so
+    parsing, validation, database access, retries, and logs all remain platform-owned.
+    """
+
+    _validate_retries(retries)
+    started_at = time.monotonic()
+    message_chars = len(raw_message) if isinstance(raw_message, str) else 0
+    _LOGGER.info(
+        "mysql_replication step=parse_instance outcome=started message_chars=%s",
+        message_chars,
+    )
+    instance = _instance_from_message(raw_message)
+    if instance is None:
+        _LOGGER.warning(
+            "mysql_replication step=parse_instance outcome=failed "
+            "reason=missing_ambiguous_or_invalid elapsed_seconds=%.3f",
+            time.monotonic() - started_at,
+        )
+        return {
+            "ok": False,
+            "error": "raw-message must contain exactly one valid Instance: ip:port line",
+            "attempts": 0,
+        }
+    _LOGGER.info(
+        "mysql_replication instance=%s step=parse_instance outcome=succeeded "
+        "elapsed_seconds=%.3f",
+        instance,
+        time.monotonic() - started_at,
+    )
+    return rebuild_replication(instance, retries=retries)
+
+
 def rebuild_replication(instance: str, *, retries: int = 2) -> dict[str, Any]:
     """Restart replication on one validated address using only fixed SQL statements.
 
@@ -24,12 +61,7 @@ def rebuild_replication(instance: str, *, retries: int = 2) -> dict[str, Any]:
     includes credentials or raw database exception messages.
     """
 
-    if (
-        isinstance(retries, bool)
-        or not isinstance(retries, int)
-        or not 0 <= retries <= _MAX_RETRIES
-    ):
-        raise ValueError("retries must be an integer between 0 and 2")
+    _validate_retries(retries)
     target = _parse_instance(instance)
     if target is None:
         return {
@@ -120,6 +152,32 @@ def _parse_instance(instance: object) -> tuple[str, int] | None:
     return host, port
 
 
+def _validate_retries(retries: object) -> None:
+    if (
+        isinstance(retries, bool)
+        or not isinstance(retries, int)
+        or not 0 <= retries <= _MAX_RETRIES
+    ):
+        raise ValueError("retries must be an integer between 0 and 2")
+
+
+def _instance_from_message(raw_message: object) -> str | None:
+    if not isinstance(raw_message, str):
+        return None
+    candidates: list[str] = []
+    for line in raw_message.splitlines():
+        label, separator, value = line.partition(":")
+        if separator and label.strip().casefold() == "instance":
+            candidates.append(value.strip())
+    if len(candidates) != 1:
+        return None
+    target = _parse_instance(candidates[0])
+    if target is None:
+        return None
+    host, port = target
+    return f"{host}:{port}"
+
+
 def _connect(**kwargs: Any) -> Any:
     import mysql.connector
 
@@ -155,4 +213,4 @@ def _log_step(
     )
 
 
-__all__ = ["rebuild_replication"]
+__all__ = ["rebuild_replication", "rebuild_replication_from_message"]

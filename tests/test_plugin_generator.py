@@ -113,6 +113,8 @@ def test_generates_valid_plugin_and_bounds_instruction_as_json_data() -> None:
         "current_plugin": None,
         "current_source": None,
     }
+    assert '`request["body"]["raw-message"]`' in prompt
+    assert "rebuild_replication_from_message" in prompt
 
 
 def test_update_prompt_contains_complete_current_plugin() -> None:
