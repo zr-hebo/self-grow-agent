@@ -11,22 +11,24 @@
 - [uv](https://docs.astral.sh/uv/)
 - `curl`（用于执行本文示例）
 
-只有选择 Pi 后端时，才额外需要 Node.js 22.19 或更高版本和 Pi CLI。
+默认的完整插件生成链路还需要 Node.js 22.19 或更高版本和 Pi CLI。只有显式使用旧版 `restricted` + `direct` 组合时，才可以不安装 Pi。
 
 在项目根目录安装 Python 3.12 和项目依赖：
 
 ```bash
 uv python install 3.12
 uv sync --python 3.12 --dev
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4
 uv run python --version
+pi --version
 ```
 
-最后一条命令应显示 Python 3.12 或更高版本。
+两个版本命令应分别显示 Python 3.12+ 和已安装的 Pi 版本。
 
 ## 从 clone 到第一个功能
 
 下面的流程从一个空目录开始，使用 DeepSeek 让 Agent 创建并立即运行第一个
-`GET /quickstart/hello` 业务 API。示例默认使用直接 LLM 后端，不需要安装 Pi。
+`GET /quickstart/hello` 业务 API。示例使用默认的 `plugin` + `pi_plugin_generation` 链路。
 
 ### 1. 获取代码并安装依赖
 
@@ -35,6 +37,7 @@ git clone https://github.com/zr-hebo/self-grow-agent.git
 cd self-grow-agent
 uv python install 3.12
 uv sync --python 3.12 --dev
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4
 ```
 
 ### 2. 在当前 shell 注入配置
@@ -45,9 +48,10 @@ uv sync --python 3.12 --dev
 : "${DEEPSEEK_API_KEY:?请先安全注入 DEEPSEEK_API_KEY}"
 export MANAGEMENT_API_KEY="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export LLM_API_KEY="$DEEPSEEK_API_KEY"
-export LLM_BASE_URL='https://api.deepseek.com'
-export LLM_MODEL='deepseek-v4-flash'
-export GENERATION_BACKEND='direct'
+export GENERATION_BACKEND='pi'
+export PI_PROVIDER='deepseek'
+export PI_MODEL='deepseek-v4-pro'
+export PI_THINKING_LEVEL='off'
 ```
 
 `MANAGEMENT_API_KEY` 是本次本地运行的管理面密码。请保持这个终端开启，或在启动服务的 shell 中使用同一组环境变量。
@@ -98,6 +102,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "project":"quickstart",
     "path":"/quickstart/hello",
     "method":"GET",
+    "execution_mode":"plugin",
     "operation_url":"/api/v1/manage/operations/<operation-id>"
   }
 }
@@ -159,9 +164,14 @@ export LLM_TIMEOUT_SECONDS='30'
 |---|---|---|
 | `MANAGEMENT_API_KEY` | 空 | 管理 API 的 `X-Management-Key`。非空时至少 16 个字符；为空时所有管理请求都会被拒绝。 |
 | `LLM_API_KEY` | 空 | LLM 凭据。为空时已有动态路由仍能运行，但创建和更新请求返回 `503`。 |
-| `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek Responses API 的基础地址；可覆盖为其他兼容服务。 |
-| `LLM_MODEL` | `deepseek-v4-flash` | 用于生成处理器的默认 DeepSeek 模型。 |
-| `LLM_TIMEOUT_SECONDS` | `30` | 调用 LLM 的超时时间，单位为秒。 |
+| `LLM_BASE_URL` | `https://api.deepseek.com` | `direct` 后端的 DeepSeek Responses API 基础地址。 |
+| `LLM_MODEL` | `deepseek-v4-flash` | `direct` 后端生成处理器所用的 DeepSeek 模型。 |
+| `LLM_TIMEOUT_SECONDS` | `30` | `direct` 后端调用 LLM 的超时时间，单位为秒。 |
+| `GENERATION_BACKEND` | `pi` | 默认使用 Pi；`direct` 仅支持显式选择的 `restricted` 单文件处理器。 |
+| `PI_EXECUTABLE` | `pi` | Pi CLI 可执行文件。 |
+| `PI_PROVIDER` | `deepseek` | Pi 使用的模型提供方。 |
+| `PI_MODEL` | `deepseek-v4-pro` | Pi 生成插件使用的模型。 |
+| `PI_THINKING_LEVEL` | `off` | 结构化生成默认关闭扩展推理，避免不必要的运行时间和事件流。 |
 | `PLUGIN_WORKSPACE_ROOT` | 系统临时目录下的 `self-grow-agent-workspaces` | operation 级插件候选工作区；必须与生成制品目录分离。 |
 | `PLUGIN_ARTIFACT_ROOT` | `generated/plugins` | 已验证的不可变插件版本。 |
 | `PLUGIN_ALLOWED_DEPENDENCIES` | 空 | 可声明的精确依赖 pin，逗号分隔；依赖必须预装。 |
@@ -220,7 +230,7 @@ Pi 进程以以下受控方式运行：
 
 Pi 的 `message_update` 等高频流式增量会被逐条校验和计数，但不会保留在内存结果中。`PI_MAX_EVENT_STREAM_BYTES` 限制单次 RPC 原始 JSONL 的累计传输量，默认 64 MiB；单条事件仍限制为 1 MiB，关键非流式事件仍最多保留 10,000 条。若模型确实需要更长输出，可在评估运行时间和带宽后提高该配置并重启服务。
 
-Pi 根据请求的 `execution_mode` 返回两类结果：默认 `restricted` 返回单文件受限 `def handle(request)`；`plugin` 返回完整、多文件、带依赖声明和测试的 JSON bundle。Pi 本身仍不编辑主仓库。插件候选由 Agent 写入外部 operation 工作区，经过策略和测试门禁后发布到不可变制品目录。数据库 schema 迁移、平台依赖升级和管理面源码等核心工程变更不属于动态插件能力，仍需常规评审、部署和重启。
+Pi 根据请求的 `execution_mode` 返回两类结果：默认 `plugin` 返回完整、多文件、带依赖声明和测试的 JSON bundle；显式 `restricted` 返回单文件受限 `def handle(request)`。Pi 本身仍不编辑主仓库。插件候选由 Agent 写入外部 operation 工作区，经过策略和测试门禁后发布到不可变制品目录。数据库 schema 迁移、平台依赖升级和管理面源码等核心工程变更不属于动态插件能力，仍需常规评审、部署和重启。
 
 Pi 官方明确说明其本身不是安全沙箱。当前阶段使用 `--no-tools`，只接受模型最终返回的文本；即使如此，公网、多租户或后续允许 Pi 操作源码的生产场景，仍必须在容器、微虚拟机或等价的外部沙箱中运行 Pi。参阅 [Pi RPC 文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md)、[Provider 配置](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md)和[安全说明](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/security.md)。
 
@@ -366,7 +376,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "project": "demo",
     "path": "/demo/hello",
     "method": "GET",
-    "execution_mode": "restricted",
+    "execution_mode": "plugin",
     "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
@@ -432,8 +442,8 @@ curl -sS "$AGENT_URL/api/v1/manage/routes" \
     "project": "demo",
     "version": 1,
     "description": "Say hello",
-    "execution_mode": "restricted",
-    "artifact_digest": null
+    "execution_mode": "plugin",
+    "artifact_digest": "<sha256>"
   }]
 }
 ```
@@ -463,8 +473,8 @@ curl -sS -X PUT "$AGENT_URL/api/v1/manage/routes/<route-id>" \
     "project": "demo",
     "version": 2,
     "description": "Greet by name",
-    "execution_mode": "restricted",
-    "artifact_digest": null
+    "execution_mode": "plugin",
+    "artifact_digest": "<sha256>"
   }
 }
 ```
@@ -490,7 +500,7 @@ curl -sS "$AGENT_URL/demo/hello"
 
 ## 完整 API 插件模式
 
-默认的 `restricted` 模式适合小型 JSON 数据转换。需要普通 Python import、多文件模块、第三方依赖声明和生成物测试时，使用 Pi 后端并显式选择 `plugin`：
+默认使用 `plugin` + `pi_plugin_generation`，支持普通 Python import、多文件模块、第三方依赖声明和生成物测试。以下请求省略 `execution_mode`，因此自动使用 `plugin`：
 
 ```bash
 export GENERATION_BACKEND=pi
@@ -504,7 +514,6 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes" \
     "path":"/rebuild_replication",
     "method":"POST",
     "project":"binlog-server",
-    "execution_mode":"plugin",
     "instruction":"从 JSON body.raw-message 提取并严格校验 Instance ip:port；只调用 self_grow_agent.capabilities.mysql_replication.rebuild_replication，不要 import 数据库驱动、不要生成或接收 SQL、不要读取或返回凭据；提供提取逻辑的单元测试。"
   }'
 ```
@@ -572,7 +581,7 @@ curl -sS -X POST "$AGENT_URL/api/v1/manage/routes/<route-id>/rollback" \
 
 > 从 `query` 读取 `name`，缺省为 `world`，返回 `{"message": "hello <name>"}`。该对象会被 Agent 自动放入业务响应的 `data` 字段。
 
-默认 `restricted` 处理器必须满足以下限制：
+显式选择的 `restricted` 处理器必须满足以下限制：
 
 - 源码只能包含一个顶层同步函数，签名必须精确为 `def handle(request)`。
 - 不允许导入、装饰器、属性访问、循环、推导式、异步代码、生成器、异常、类、lambda、嵌套函数或私有标识符。

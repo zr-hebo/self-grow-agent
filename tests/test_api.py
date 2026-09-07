@@ -377,7 +377,6 @@ def test_management_api_creates_and_updates_complete_plugin_route(tmp_path: Path
                 "path": "/run",
                 "method": "POST",
                 "project": "demo",
-                "execution_mode": "plugin",
                 "instruction": "Return version one",
             },
         )
@@ -425,6 +424,72 @@ def test_management_api_creates_and_updates_complete_plugin_route(tmp_path: Path
 
     assert plugin_generator.calls[0]["current_plugin"] is None
     assert isinstance(plugin_generator.calls[1]["current_plugin"], GeneratedPlugin)
+
+
+def test_revise_defaults_an_existing_restricted_route_to_plugin(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    runtime = RouteRuntime(settings.generated_dir)
+    existing = runtime.create(
+        "/demo/run",
+        "POST",
+        'def handle(request):\n    return {"value": "restricted"}\n',
+        project="demo",
+    )
+    store = RequirementStore(settings.metadata_db_path)
+    requirement = store.create(
+        "demo: POST /run",
+        "Return the restricted version",
+        existing.path,
+        existing.method,
+        project=existing.project,
+        execution_mode="restricted",
+        route_id=existing.route_id,
+        route_version=existing.version,
+    )
+    store.begin_implementation(requirement.id)
+    store.complete_implementation(
+        requirement.id,
+        route_id=existing.route_id,
+        route_version=existing.version,
+    )
+    plugin_generator = FakePluginGenerator(_generated_plugin("plugin"))
+    app = build_app(
+        settings=settings,
+        generator=FakeFeatureGenerator(),
+        plugin_generator=plugin_generator,
+        runtime=runtime,
+        requirement_store=store,
+        handler_executor=InlineHandlerExecutor(),
+    )
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
+            headers=management_headers(),
+            json={
+                "title": "demo: POST /run",
+                "instruction": "Replace it with a complete plugin",
+            },
+        )
+        receipt = api_data(accepted)
+        assert receipt["execution_mode"] == "plugin"
+        for _ in range(300):
+            operation = api_data(
+                client.get(receipt["operation_url"], headers=management_headers())
+            )
+            if operation["status"] in {"finish", "failed"}:
+                break
+            time.sleep(0.01)
+
+        assert operation["status"] == "finish", operation
+        assert operation["execution_mode"] == "plugin"
+        assert api_data(client.post("/demo/run", json={})) == {"value": "plugin"}
+
+    updated = runtime.get(existing.route_id)
+    assert updated is not None
+    assert updated.execution_mode == "plugin"
+    assert updated.version == 2
+    assert plugin_generator.calls[0]["current_plugin"] is None
 
 
 def assert_api_error(response: httpx.Response, message: str) -> None:
@@ -500,6 +565,7 @@ def test_create_route_is_immediately_available(tmp_path: Path) -> None:
         json={
             "path": "/hello",
             "method": "GET",
+            "execution_mode": "restricted",
             "instruction": "Return a hello message",
         },
     )
@@ -551,6 +617,7 @@ def test_create_route_returns_an_accepted_task_before_generation_finishes(
                     "path": "/hello",
                     "method": "GET",
                     "project": "demo",
+                    "execution_mode": "restricted",
                     "instruction": "Return hello",
                 },
             )
@@ -659,6 +726,7 @@ def test_revise_and_implement_saves_the_draft_and_returns_before_generation(
                 json={
                     "title": "Greeting API v2",
                     "instruction": "Return hello v2",
+                    "execution_mode": "restricted",
                 },
             )
             assert accepted.status_code == 202
@@ -753,7 +821,11 @@ def test_revise_and_implement_automatically_uses_the_current_route_version(
         accepted = client.post(
             f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
             headers=management_headers(),
-            json={"title": "Greeting v3", "instruction": "Return v3"},
+            json={
+                "title": "Greeting v3",
+                "instruction": "Return v3",
+                "execution_mode": "restricted",
+            },
         )
         assert accepted.status_code == 202
         receipt = api_data(accepted)
@@ -823,6 +895,7 @@ def test_each_revise_and_implement_call_creates_a_new_operation_id(
             json={
                 "title": f"Greeting v{version}",
                 "instruction": f"Return v{version}",
+                "execution_mode": "restricted",
             },
         )
         assert accepted.status_code == 202
@@ -894,7 +967,11 @@ def test_revise_operation_detects_a_real_publish_time_version_conflict(
             accepted = await client.post(
                 f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
                 headers=management_headers(),
-                json={"title": "Greeting generated", "instruction": "Return generated"},
+                json={
+                    "title": "Greeting generated",
+                    "instruction": "Return generated",
+                    "execution_mode": "restricted",
+                },
             )
             receipt = api_data(accepted)
             assert await asyncio.wait_for(generator.started.wait(), timeout=1)
@@ -1002,6 +1079,7 @@ def test_routes_can_be_filtered_and_grouped_by_project(tmp_path: Path) -> None:
                 "path": path,
                 "method": "GET",
                 "project": project,
+                "execution_mode": "restricted",
                 "instruction": f"Create {project}",
             },
         )
@@ -1040,7 +1118,12 @@ def test_all_projects_publish_below_their_project_prefix(tmp_path: Path) -> None
     default_created = client.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "Return ok"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "Return ok",
+        },
     )
     project_created = client.post(
         "/api/v1/manage/routes",
@@ -1049,6 +1132,7 @@ def test_all_projects_publish_below_their_project_prefix(tmp_path: Path) -> None
             "path": "/rebuild_replication",
             "method": "POST",
             "project": "binlog-server",
+            "execution_mode": "restricted",
             "instruction": "Return ok",
         },
     )
@@ -1211,6 +1295,7 @@ def test_async_operation_persists_adapter_authored_safe_pi_failure(
                 "project": "binlog-server",
                 "path": "/rebuild_replication",
                 "method": "POST",
+                "execution_mode": "restricted",
                 "instruction": "Generate the route",
             },
         )
@@ -1277,7 +1362,11 @@ def test_retry_failed_update_creates_new_operation_with_current_route_version(
         first = client.post(
             f"/api/v1/manage/requirements/{requirement.id}/revise-and-implement",
             headers=management_headers(),
-            json={"title": "Greeting v3", "instruction": "Return v3"},
+            json={
+                "title": "Greeting v3",
+                "instruction": "Return v3",
+                "execution_mode": "restricted",
+            },
         )
         first_receipt = api_data(first)
         for _ in range(100):
@@ -1368,7 +1457,12 @@ def test_max_length_path_can_be_created_and_called(tmp_path: Path) -> None:
     created = client.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": path, "method": "GET", "instruction": "Return ok"},
+        json={
+            "path": path,
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "Return ok",
+        },
     )
 
     assert created.status_code == 201
@@ -1392,7 +1486,12 @@ def test_new_app_instance_recovers_real_generated_handler(tmp_path: Path) -> Non
         first_client.post(
             "/api/v1/manage/routes",
             headers=management_headers(),
-            json={"path": "/hello", "method": "GET", "instruction": "hello"},
+            json={
+                "path": "/hello",
+                "method": "GET",
+                "execution_mode": "restricted",
+                "instruction": "hello",
+            },
         ).status_code
         == 201
     )
@@ -1649,7 +1748,12 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     create_response = client.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "Say hello"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "Say hello",
+        },
     )
     assert create_response.status_code == 201
 
@@ -1657,7 +1761,11 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     updated = client.put(
         f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
-        json={"instruction": "Greet the name query parameter", "expected_version": 1},
+        json={
+            "instruction": "Greet the name query parameter",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
 
     assert updated.status_code == 200
@@ -1672,7 +1780,11 @@ def test_update_route_hot_swaps_handler_with_version_check(tmp_path: Path) -> No
     stale = client.put(
         f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
-        json={"instruction": "Another change", "expected_version": 1},
+        json={
+            "instruction": "Another change",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
     assert stale.status_code == 409
 
@@ -1692,7 +1804,12 @@ def test_post_business_route_receives_json_body(tmp_path: Path) -> None:
     created = client.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/echo", "method": "POST", "instruction": "Echo JSON body"},
+        json={
+            "path": "/echo",
+            "method": "POST",
+            "execution_mode": "restricted",
+            "instruction": "Echo JSON body",
+        },
     )
 
     response = client.post("/default/echo", json={"name": "Tom"})
@@ -1725,7 +1842,12 @@ def test_post_business_route_defaults_to_json_body_without_content_type(
         client.post(
             "/api/v1/manage/routes",
             headers=management_headers(),
-            json={"path": "/echo", "method": "POST", "instruction": "Echo name"},
+            json={
+                "path": "/echo",
+                "method": "POST",
+                "execution_mode": "restricted",
+                "instruction": "Echo name",
+            },
         ).status_code
         == 201
     )
@@ -1777,7 +1899,12 @@ def test_json_suffix_media_type_is_parsed_as_json(tmp_path: Path) -> None:
         client.post(
             "/api/v1/manage/routes",
             headers=management_headers(),
-            json={"path": "/patch", "method": "PATCH", "instruction": "Echo patch"},
+            json={
+                "path": "/patch",
+                "method": "PATCH",
+                "execution_mode": "restricted",
+                "instruction": "Echo patch",
+            },
         ).status_code
         == 201
     )
@@ -1826,7 +1953,12 @@ def test_sensitive_headers_are_not_exposed_to_generated_handler(tmp_path: Path) 
         client.post(
             "/api/v1/manage/routes",
             headers=management_headers(),
-            json={"path": "/headers", "method": "GET", "instruction": "Show headers"},
+            json={
+                "path": "/headers",
+                "method": "GET",
+                "execution_mode": "restricted",
+                "instruction": "Show headers",
+            },
         ).status_code
         == 201
     )
@@ -1861,7 +1993,11 @@ def test_update_unknown_route_returns_not_found_without_calling_llm(
     response = client.put(
         "/api/v1/manage/routes/get-missing",
         headers=management_headers(),
-        json={"instruction": "change", "expected_version": 1},
+        json={
+            "instruction": "change",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
 
     assert response.status_code == 404
@@ -1880,7 +2016,12 @@ def test_invalid_generated_update_keeps_old_handler(tmp_path: Path) -> None:
         client.post(
             "/api/v1/manage/routes",
             headers=management_headers(),
-            json={"path": "/hello", "method": "GET", "instruction": "old"},
+            json={
+                "path": "/hello",
+                "method": "GET",
+                "execution_mode": "restricted",
+                "instruction": "old",
+            },
         ).status_code
         == 201
     )
@@ -1889,7 +2030,11 @@ def test_invalid_generated_update_keeps_old_handler(tmp_path: Path) -> None:
     rejected = client.put(
         f"/api/v1/manage/routes/{route_id}",
         headers=management_headers(),
-        json={"instruction": "unsafe", "expected_version": 1},
+        json={
+            "instruction": "unsafe",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
 
     assert rejected.status_code == 422
@@ -1907,7 +2052,12 @@ def test_create_conflict_and_route_listing(tmp_path: Path) -> None:
     client = TestClient(
         create_test_app(settings=make_settings(tmp_path), generator=generator)
     )
-    body = {"path": "/hello", "method": "GET", "instruction": "hello"}
+    body = {
+        "path": "/hello",
+        "method": "GET",
+        "execution_mode": "restricted",
+        "instruction": "hello",
+    }
 
     assert (
         client.post(
@@ -1981,7 +2131,12 @@ def test_management_reports_unconfigured_or_failed_llm(tmp_path: Path) -> None:
     unavailable = without_llm.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "hello"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "hello",
+        },
     )
     assert unavailable.status_code == 503
 
@@ -1991,7 +2146,12 @@ def test_management_reports_unconfigured_or_failed_llm(tmp_path: Path) -> None:
     ).post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "hello"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "hello",
+        },
     )
     assert failed.status_code == 502
 
@@ -2005,7 +2165,12 @@ def test_management_reports_generation_capacity_with_retry_hint(tmp_path: Path) 
     ).post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "hello"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "hello",
+        },
     )
 
     assert response.status_code == 429
@@ -2034,7 +2199,12 @@ def test_route_publication_failure_returns_service_unavailable(
     response = client.post(
         "/api/v1/manage/routes",
         headers=management_headers(),
-        json={"path": "/hello", "method": "GET", "instruction": "hello"},
+        json={
+            "path": "/hello",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "hello",
+        },
     )
 
     assert response.status_code == 503

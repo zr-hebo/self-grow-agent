@@ -41,6 +41,7 @@ def test_pi_rpc_backend_generates_and_hot_loads_handler(tmp_path: Path) -> None:
             json={
                 "path": "/pi-hello",
                 "method": "GET",
+                "execution_mode": "restricted",
                 "instruction": "Return a greeting generated through Pi",
             },
         )

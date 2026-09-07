@@ -256,6 +256,7 @@ class AgentStack:
                 ),
                 "LLM_MODEL": LLM_MODEL,
                 "LLM_TIMEOUT_SECONDS": "3",
+                "GENERATION_BACKEND": "direct",
                 "GENERATED_DIR": str(self.generated_dir),
                 "HANDLER_TIMEOUT_SECONDS": "3",
                 "MAX_CONCURRENT_HANDLERS": "8",

@@ -46,6 +46,7 @@ def _create_hello(agent_stack, source: str = HELLO_V1):
         json={
             "path": "/hello",
             "method": "GET",
+            "execution_mode": "restricted",
             "instruction": "Return the CICD hello message",
         },
     )
@@ -86,6 +87,7 @@ def _update_hello(agent_stack, *, source: str, expected_version: int):
         json={
             "instruction": f"Update the CICD greeting to v{expected_version + 1}",
             "expected_version": expected_version,
+            "execution_mode": "restricted",
         },
     )
 
@@ -144,6 +146,7 @@ def test_concurrent_business_requests(agent_stack) -> None:
         json={
             "path": "/concurrent-echo",
             "method": "GET",
+            "execution_mode": "restricted",
             "instruction": "Echo the request_id query parameter",
         },
     )
@@ -194,6 +197,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
             "instruction": "Return the CICD hello message",
             "path": "/console-hello",
             "method": "GET",
+            "execution_mode": "restricted",
         },
     )
     assert created.status_code == 201, created.text
@@ -208,6 +212,7 @@ def test_console_requirement_metadata_survives_restart(agent_stack) -> None:
         json={
             "title": "CICD console greeting (revised)",
             "instruction": "Return the CICD hello message after revision",
+            "execution_mode": "restricted",
         },
     )
     completed = _wait_for_route_task(agent_stack, implemented)
@@ -291,7 +296,11 @@ def test_hot_reload_update(agent_stack) -> None:
     stale = agent_stack.require_client().put(
         f"/api/v1/manage/routes/{route_id}",
         headers=agent_stack.management_headers,
-        json={"instruction": "This stale update must not run", "expected_version": 1},
+        json={
+            "instruction": "This stale update must not run",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
     assert stale.status_code == 409
     assert len(agent_stack.stub.requests) == llm_request_count
@@ -358,7 +367,12 @@ def test_restart_recovery(agent_stack) -> None:
     unavailable = agent_stack.require_client().post(
         "/api/v1/manage/routes",
         headers=agent_stack.management_headers,
-        json={"path": "/new", "method": "GET", "instruction": "Return new"},
+        json={
+            "path": "/new",
+            "method": "GET",
+            "execution_mode": "restricted",
+            "instruction": "Return new",
+        },
     )
     assert unavailable.status_code == 503
     assert_api_error(unavailable, "LLM is not configured")

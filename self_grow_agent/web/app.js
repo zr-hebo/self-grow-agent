@@ -308,7 +308,7 @@ function resetEditor() {
   elements.requirementId.value = "";
   elements.linkedRouteId.value = "";
   elements.routeMethod.value = "GET";
-  elements.executionMode.value = "restricted";
+  elements.executionMode.value = "plugin";
   elements.routeProject.value = "default";
   elements.routePath.value = "/hello";
   elements.instructionLength.textContent = "0";

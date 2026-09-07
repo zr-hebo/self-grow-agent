@@ -29,10 +29,11 @@ def _settings(tmp_path: Path) -> Settings:
         pi_admission_timeout_seconds=0.75,
         pi_workspace_root=tmp_path / "pi-workspaces",
         pi_provider_env_name="DEEPSEEK_API_KEY",
+        generation_backend="direct",
     )
 
 
-def test_build_generator_keeps_direct_backend_as_default(monkeypatch, tmp_path: Path) -> None:
+def test_build_generator_uses_explicit_direct_backend(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class RecordingDirectGenerator:

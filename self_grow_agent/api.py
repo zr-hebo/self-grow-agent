@@ -35,6 +35,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from config import Settings, load_settings
 from self_grow_agent.code_loader import CodeValidationError, HandlerContractError
+from self_grow_agent.execution_modes import DEFAULT_EXECUTION_MODE, ExecutionMode
 from self_grow_agent.executor import (
     HandlerExecutor,
     HandlerProcessError,
@@ -312,7 +313,7 @@ class CreateRouteRequest(BaseModel):
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
     project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
-    execution_mode: Literal["restricted", "plugin"] = "restricted"
+    execution_mode: ExecutionMode = DEFAULT_EXECUTION_MODE
     instruction: str = Field(min_length=1, max_length=8_000)
 
     _normalize_instruction = field_validator("instruction")(_required_text)
@@ -324,7 +325,7 @@ class UpdateRouteRequest(BaseModel):
 
     instruction: str = Field(min_length=1, max_length=8_000)
     expected_version: int = Field(ge=1)
-    execution_mode: Literal["restricted", "plugin"] | None = None
+    execution_mode: ExecutionMode | None = DEFAULT_EXECUTION_MODE
 
     _normalize_instruction = field_validator("instruction")(_required_text)
 
@@ -360,7 +361,7 @@ class CreateRequirementRequest(BaseModel):
     path: str = Field(min_length=1, max_length=256)
     method: str = Field(min_length=1, max_length=16)
     project: str = Field(default=DEFAULT_PROJECT, min_length=1, max_length=63)
-    execution_mode: Literal["restricted", "plugin"] = "restricted"
+    execution_mode: ExecutionMode = DEFAULT_EXECUTION_MODE
     route_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     _normalize_required_text = field_validator("title", "instruction")(_required_text)
@@ -372,7 +373,7 @@ class UpdateRequirementRequest(BaseModel):
 
     title: str = Field(min_length=1, max_length=120)
     instruction: str = Field(min_length=1, max_length=8_000)
-    execution_mode: Literal["restricted", "plugin"] | None = None
+    execution_mode: ExecutionMode | None = DEFAULT_EXECUTION_MODE
 
     _normalize_required_text = field_validator("title", "instruction")(_required_text)
 

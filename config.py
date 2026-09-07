@@ -71,7 +71,7 @@ class Settings:
     handler_cpu_limit_seconds: int = 1
     max_concurrent_handlers: int = 4
     handler_admission_timeout_seconds: float = 0.1
-    generation_backend: str = "direct"
+    generation_backend: str = "pi"
     pi_executable: str = "pi"
     pi_provider: str = "deepseek"
     pi_model: str = "deepseek-v4-pro"
@@ -232,7 +232,7 @@ def load_settings() -> Settings:
         handler_admission_timeout_seconds=float(
             environ.get("HANDLER_ADMISSION_TIMEOUT_SECONDS", "0.1")
         ),
-        generation_backend=environ.get("GENERATION_BACKEND", "direct"),
+        generation_backend=environ.get("GENERATION_BACKEND", "pi"),
         pi_executable=environ.get("PI_EXECUTABLE", "pi"),
         pi_provider=environ.get("PI_PROVIDER", "deepseek"),
         pi_model=environ.get("PI_MODEL", "deepseek-v4-pro"),

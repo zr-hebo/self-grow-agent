@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from self_grow_agent.execution_modes import DEFAULT_EXECUTION_MODE
 from self_grow_agent.projects import DEFAULT_PROJECT, normalize_project
 
 RequirementStatus = Literal["draft", "implementing", "active", "failed"]
@@ -480,7 +481,7 @@ class RequirementStore:
         method: str,
         *,
         project: str = DEFAULT_PROJECT,
-        execution_mode: str = "restricted",
+        execution_mode: str = DEFAULT_EXECUTION_MODE,
         route_id: str | None = None,
         route_version: int | None = None,
     ) -> RequirementRecord:
@@ -541,7 +542,7 @@ class RequirementStore:
         path: str,
         method: str,
         project: str,
-        execution_mode: str = "restricted",
+        execution_mode: str = DEFAULT_EXECUTION_MODE,
         base_route_id: str | None = None,
         base_route_version: int | None = None,
     ) -> OperationRecord:
@@ -588,7 +589,7 @@ class RequirementStore:
         title: str,
         instruction: str,
         kind: str,
-        execution_mode: str | None = None,
+        execution_mode: str | None = DEFAULT_EXECUTION_MODE,
         base_route_id: str | None = None,
         base_route_version: int | None = None,
     ) -> OperationRecord:

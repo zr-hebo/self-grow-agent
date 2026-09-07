@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Literal, NoReturn
+from typing import NoReturn
 
+from self_grow_agent.execution_modes import DEFAULT_EXECUTION_MODE, ExecutionMode
 from self_grow_agent.llm import FeatureGenerator, GenerationCapacityError, GenerationError
 from self_grow_agent.models import PluginFeatureGenerator
 from self_grow_agent.pi_generator import SAFE_PI_GENERATION_FAILURE_MESSAGES
@@ -101,7 +102,7 @@ class AgentManagementService:
         method: str,
         instruction: str,
         project: str = DEFAULT_PROJECT,
-        execution_mode: Literal["restricted", "plugin"] = "restricted",
+        execution_mode: ExecutionMode = DEFAULT_EXECUTION_MODE,
         operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
@@ -156,7 +157,7 @@ class AgentManagementService:
         route_id: str,
         instruction: str,
         expected_version: int,
-        execution_mode: Literal["restricted", "plugin"] | None = None,
+        execution_mode: ExecutionMode | None = DEFAULT_EXECUTION_MODE,
         operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:
@@ -216,7 +217,7 @@ class AgentManagementService:
         project: str,
         instruction: str,
         expected_version: int,
-        execution_mode: Literal["restricted", "plugin"] | None = None,
+        execution_mode: ExecutionMode | None = None,
         operation_id: str | None = None,
         before_publish: PublicationHook | None = None,
     ) -> RouteRecord:

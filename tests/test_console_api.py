@@ -184,6 +184,7 @@ def create_requirement(
         "path": path,
         "method": method,
         "project": project,
+        "execution_mode": "restricted",
     }
     if route_id is not None:
         payload["route_id"] = route_id
@@ -433,6 +434,7 @@ def test_editing_an_active_requirement_and_reimplementing_publishes_version_two(
         json={
             "title": "Greeting API v2",
             "instruction": "Return the revised greeting",
+            "execution_mode": "restricted",
         },
     )
     second_implementation = client.post(
@@ -551,7 +553,11 @@ def test_requirement_can_rebase_after_route_is_updated_directly(
     direct_update = client.put(
         f"/api/v1/manage/routes/{existing.route_id}",
         headers=management_headers(),
-        json={"instruction": "Update the route directly", "expected_version": 1},
+        json={
+            "instruction": "Update the route directly",
+            "expected_version": 1,
+            "execution_mode": "restricted",
+        },
     )
     rebased = client.post(
         f"/api/v1/manage/requirements/{requirement_id}/rebase",
@@ -712,6 +718,7 @@ def test_cancelled_implement_request_continues_to_a_consistent_result(
                     "instruction": "Return a greeting",
                     "path": "/hello",
                     "method": "GET",
+                    "execution_mode": "restricted",
                 },
             )
             requirement_id = api_data(created)["id"]
@@ -781,6 +788,7 @@ def test_cancelled_background_operation_records_specific_failure_and_log(
                     "instruction": "Return a greeting",
                     "path": "/hello",
                     "method": "GET",
+                    "execution_mode": "restricted",
                 },
             )
             requirement_id = api_data(created)["id"]
@@ -790,6 +798,7 @@ def test_cancelled_background_operation_records_specific_failure_and_log(
                 json={
                     "title": "Greeting API",
                     "instruction": "Return a revised greeting",
+                    "execution_mode": "restricted",
                 },
             )
             operation_id = api_data(accepted)["operation_id"]

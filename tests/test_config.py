@@ -169,7 +169,7 @@ def test_load_settings_does_not_require_llm_api_key(monkeypatch) -> None:
     assert settings.port > 0
     assert settings.generated_dir == Path(__file__).parents[1] / "generated"
     assert settings.metadata_db_path == settings.generated_dir / "runtime-metadata.sqlite3"
-    assert settings.generation_backend == "direct"
+    assert settings.generation_backend == "pi"
     assert settings.pi_executable == "pi"
     assert settings.pi_provider == "deepseek"
     assert settings.pi_model == "deepseek-v4-pro"

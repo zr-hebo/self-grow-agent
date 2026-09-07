@@ -17,23 +17,26 @@
 
 ## 快速开始
 
-要求 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。以下示例显式使用
-[DeepSeek Responses API](https://api-docs.deepseek.com/guides/responses_api/)，真实密钥应先由秘密管理器注入
+要求 Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 22.19+ 和
+[Pi Coding Agent](https://github.com/earendil-works/pi)。以下示例通过 Pi 使用 DeepSeek，真实密钥应先由秘密管理器注入
 `DEEPSEEK_API_KEY`，不要写入仓库或命令历史。
 
 ```bash
 uv sync --dev
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@0.84.4
 
 export MANAGEMENT_API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 : "${DEEPSEEK_API_KEY:?请先安全注入 DEEPSEEK_API_KEY}"
 export LLM_API_KEY="$DEEPSEEK_API_KEY"
-export LLM_MODEL='deepseek-v4-flash'
-export LLM_BASE_URL='https://api.deepseek.com'
+export GENERATION_BACKEND='pi'
+export PI_PROVIDER='deepseek'
+export PI_MODEL='deepseek-v4-pro'
+export PI_THINKING_LEVEL='off'
 
 uv run python main.py
 ```
 
-若要生成带普通 import、多文件和测试的完整 API 插件，先安装 `@earendil-works/pi-coding-agent@0.84.4`（Node.js 22.19+），再设置 `GENERATION_BACKEND=pi`、`PI_PROVIDER=deepseek`、`PI_MODEL=deepseek-v4-pro`、`PI_THINKING_LEVEL=off`，并在请求中传 `"execution_mode":"plugin"`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
+默认生成链路是 `execution_mode=plugin` + `GENERATION_BACKEND=pi`，会生成带普通 import、多文件和测试的完整 API 插件；请求无需重复传 `execution_mode`。Pi 以 `--no-tools` 运行并返回完整文件 bundle，不直接编辑主仓库；Agent 在外部工作区校验和测试后发布不可变版本。若只需要旧版单文件受限处理器，可同时设置 `GENERATION_BACKEND=direct` 并在管理请求中显式传 `"execution_mode":"restricted"`。完整配置和安全边界见[使用指南](docs/USAGE.md#完整-api-插件模式)。
 
 MySQL replication 类 API 必须调用平台内置的受控 capability，生成代码不能直接 import MySQL 驱动或接收任意 SQL。平台使用官方 `mysql-connector-python`，只执行固定的 `STOP REPLICA` 与 `START REPLICA`，凭据从运行环境安全注入。真实 Docker + MySQL 8.4 端到端用例可用 `make cicd-infra` 运行。
 
@@ -77,7 +80,7 @@ curl -X POST 'http://127.0.0.1:8000/api/v1/manage/routes' \
     "project": "quickstart",
     "path": "/quickstart/hello",
     "method": "GET",
-    "execution_mode": "restricted",
+    "execution_mode": "plugin",
     "operation_url": "/api/v1/manage/operations/<operation-id>"
   }
 }
@@ -181,7 +184,7 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 }
 ```
 
-两种模式都必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。默认 `restricted` 模式只支持受限纯数据转换；显式 `plugin` 模式支持通过策略检查的普通 import、多文件和测试，仍禁止 shell、动态 import、任意文件访问及嵌入凭据。动态 API 的请求体统一使用 JSON：有请求体时会作为解析后的 JSON 值传入 `request["body"]`，无请求体时为 `null`。
+两种模式都必须定义同步函数 `def handle(request)` 并返回可 JSON 序列化的值。默认 `plugin` 模式支持通过策略检查的普通 import、多文件和测试，仍禁止 shell、动态 import、任意文件访问及嵌入凭据；显式 `restricted` 模式只支持受限纯数据转换。动态 API 的请求体统一使用 JSON：有请求体时会作为解析后的 JSON 值传入 `request["body"]`，无请求体时为 `null`。
 
 ## 配置
 
@@ -194,9 +197,9 @@ curl 'http://127.0.0.1:8000/api/v1/manage/routes?project=quickstart' \
 | `MANAGEMENT_API_KEY` | 空 | 至少 16 字符；为空时所有管理请求均拒绝 |
 | `LLM_API_KEY` | 空 | LLM 密钥；为空时业务路由仍可恢复和运行，但生成请求返回 `503` |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | DeepSeek Responses API 地址；可覆盖为其他兼容地址 |
-| `LLM_MODEL` | `deepseek-v4-flash` | 默认生成处理器所用的 DeepSeek 模型 |
-| `LLM_TIMEOUT_SECONDS` | `30` | LLM 请求超时秒数 |
-| `GENERATION_BACKEND` | `direct` | 处理器生成后端：`direct` 或 `pi` |
+| `LLM_MODEL` | `deepseek-v4-flash` | `direct` 后端生成处理器所用的 DeepSeek 模型 |
+| `LLM_TIMEOUT_SECONDS` | `30` | `direct` 后端的 LLM 请求超时秒数 |
+| `GENERATION_BACKEND` | `pi` | 生成后端：默认 `pi` 支持完整插件；`direct` 仅用于显式 `restricted` 单文件处理器 |
 | `PI_EXECUTABLE` | `pi` | Pi CLI 可执行文件路径 |
 | `PI_PROVIDER` | `deepseek` | Pi 使用的模型提供方 |
 | `PI_MODEL` | `deepseek-v4-pro` | Pi 使用的模型 |

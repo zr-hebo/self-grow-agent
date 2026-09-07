@@ -63,12 +63,12 @@ def test_plugin_lifecycle(tmp_path: Path) -> None:
                 "path": "/echo",
                 "method": "POST",
                 "project": "cicd",
-                "execution_mode": "plugin",
                 "instruction": "Return plugin version one",
             },
         )
         assert created.status_code == 202, created.text
         receipt = _data(created)
+        assert receipt["execution_mode"] == "plugin"
         requirement_id = receipt["requirement_id"]
         assert _wait(stack, receipt["operation_url"])["status"] == "finish"
         assert _data(client.post("/cicd/echo", json={})) == {"value": "plugin-v1"}
@@ -115,6 +115,7 @@ def test_plugin_lifecycle(tmp_path: Path) -> None:
         assert _data(client.post("/cicd/echo", json={})) == {"value": "plugin-v1"}
 
         service_log = stack.service_log_path.read_text(encoding="utf-8")
+        assert "pi_plugin_generation queued" in service_log
         assert "plugin_publication validation_started" in service_log
         assert "plugin_publication tests_completed" in service_log
         assert "plugin_publication activated" in service_log
