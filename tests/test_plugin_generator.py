@@ -103,9 +103,7 @@ def test_generates_valid_plugin_and_bounds_instruction_as_json_data() -> None:
     encoded_task_data = prompt.split("BEGIN_UNTRUSTED_TASK_DATA\n", 1)[1].rsplit(
         "\nEND_UNTRUSTED_TASK_DATA", 1
     )[0]
-    task_data = json.loads(
-        base64.b64decode(encoded_task_data, validate=True).decode("utf-8")
-    )
+    task_data = json.loads(base64.b64decode(encoded_task_data, validate=True).decode("utf-8"))
     assert task_data == {
         "operation": "create",
         "instruction": adversarial_instruction,
@@ -113,6 +111,7 @@ def test_generates_valid_plugin_and_bounds_instruction_as_json_data() -> None:
         "path": "/binlog-server/rebuild_replication",
         "project": "binlog-server",
         "current_plugin": None,
+        "current_source": None,
     }
 
 
@@ -139,26 +138,72 @@ def test_update_prompt_contains_complete_current_plugin() -> None:
     encoded_task_data = prompt.split("BEGIN_UNTRUSTED_TASK_DATA\n", 1)[1].rsplit(
         "\nEND_UNTRUSTED_TASK_DATA", 1
     )[0]
-    task_data = json.loads(
-        base64.b64decode(encoded_task_data, validate=True).decode("utf-8")
-    )
+    task_data = json.loads(base64.b64decode(encoded_task_data, validate=True).decode("utf-8"))
     assert task_data["operation"] == "update"
     assert task_data["current_plugin"]["files"][0]["path"] == "handler.py"
+    assert task_data["current_source"] is None
+
+
+def test_migration_prompt_contains_restricted_current_source() -> None:
+    client = RecordingRpcClient()
+    current_source = "def handle(request):\n    return {'value': 'restricted'}\n"
+
+    asyncio.run(
+        _generator(client).generate_plugin(
+            instruction="Convert it to a plugin",
+            path="/demo/handler",
+            method="POST",
+            project="demo",
+            current_source=current_source,
+        )
+    )
+
+    encoded_task_data = (
+        client.prompts[0]
+        .split("BEGIN_UNTRUSTED_TASK_DATA\n", 1)[1]
+        .rsplit("\nEND_UNTRUSTED_TASK_DATA", 1)[0]
+    )
+    task_data = json.loads(base64.b64decode(encoded_task_data, validate=True).decode("utf-8"))
+    assert task_data["operation"] == "migrate"
+    assert task_data["current_plugin"] is None
+    assert task_data["current_source"] == current_source
+
+
+def test_accepts_one_markdown_json_fence() -> None:
+    output = f"```json\n{_bundle_json()}\n```"
+
+    plugin = asyncio.run(
+        _generator(RecordingRpcClient(output)).generate_plugin(
+            instruction="Build it",
+            path="/demo/handler",
+            method="POST",
+            project="demo",
+        )
+    )
+
+    assert isinstance(plugin, GeneratedPlugin)
 
 
 @pytest.mark.parametrize(
-    "output",
+    ("output", "message"),
     [
-        "not json",
-        "[]",
-        json.dumps({"description": "missing files"}),
-        _bundle_json(dependency="requests==2.32.0"),
+        ("not json", "Pi returned invalid plugin JSON"),
+        ("[]", "Pi returned plugin bundle with invalid schema"),
+        (
+            json.dumps({"description": "missing files"}),
+            "Pi returned plugin bundle with invalid schema",
+        ),
+        (
+            _bundle_json(dependency="requests==2.32.0"),
+            "Pi returned plugin bundle rejected by policy",
+        ),
     ],
 )
 def test_rejects_invalid_or_policy_violating_bundle_without_output_details(
     output: str,
+    message: str,
 ) -> None:
-    with pytest.raises(GenerationError, match="Pi returned invalid plugin bundle") as raised:
+    with pytest.raises(GenerationError, match=message) as raised:
         asyncio.run(
             _generator(RecordingRpcClient(output)).generate_plugin(
                 instruction="Build it",
@@ -169,6 +214,28 @@ def test_rejects_invalid_or_policy_violating_bundle_without_output_details(
         )
 
     assert output not in str(raised.value)
+
+
+def test_logs_safe_bundle_failure_category_without_response_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    response_secret = secrets.token_urlsafe(32)
+    caplog.set_level(logging.INFO, logger="uvicorn.error")
+
+    with pytest.raises(GenerationError, match="Pi returned invalid plugin JSON"):
+        asyncio.run(
+            _generator(RecordingRpcClient(f"not-json-{response_secret}")).generate_plugin(
+                instruction="Build it",
+                path="/demo/handler",
+                method="POST",
+                project="demo",
+            )
+        )
+
+    logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "pi_plugin_generation failed" in logs
+    assert "category=pi_returned_invalid_plugin_json" in logs
+    assert response_secret not in logs
 
 
 def test_preserves_safe_rpc_failure_and_hides_untrusted_rpc_error() -> None:

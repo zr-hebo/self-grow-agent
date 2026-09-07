@@ -11,6 +11,7 @@ from self_grow_agent.execution_modes import DEFAULT_EXECUTION_MODE, ExecutionMod
 from self_grow_agent.llm import FeatureGenerator, GenerationCapacityError, GenerationError
 from self_grow_agent.models import PluginFeatureGenerator
 from self_grow_agent.pi_generator import SAFE_PI_GENERATION_FAILURE_MESSAGES
+from self_grow_agent.plugin_generator import SAFE_PI_PLUGIN_GENERATION_FAILURE_MESSAGES
 from self_grow_agent.plugin_models import GeneratedPlugin
 from self_grow_agent.plugin_runtime import (
     PluginPublicationError,
@@ -43,6 +44,7 @@ class FeatureGenerationCapacityError(AgentServiceError):
 _SAFE_GENERATION_FAILURE_MESSAGES = frozenset(
     {
         *SAFE_PI_GENERATION_FAILURE_MESSAGES,
+        *SAFE_PI_PLUGIN_GENERATION_FAILURE_MESSAGES,
         "LLM provider request failed",
         "LLM provider request timed out",
         "LLM provider authentication failed",
@@ -180,6 +182,7 @@ class AgentManagementService:
                 method=current.method,
                 project=current.project,
                 current_plugin=current_plugin,
+                current_source=(current.source if current.execution_mode == "restricted" else None),
             )
             publisher = self._require_plugin_publisher()
             return await self._run_plugin_publication(
@@ -244,6 +247,7 @@ class AgentManagementService:
                 method=current.method,
                 project=normalized_project,
                 current_plugin=current_plugin,
+                current_source=(current.source if current.execution_mode == "restricted" else None),
             )
             publisher = self._require_plugin_publisher()
             return await self._run_plugin_publication(
@@ -312,6 +316,7 @@ class AgentManagementService:
         method: str,
         project: str,
         current_plugin: GeneratedPlugin | None = None,
+        current_source: str | None = None,
     ) -> GeneratedPlugin:
         if self.plugin_generator is None:
             raise LLMUnavailableError("plugin generation is not configured")
@@ -322,9 +327,10 @@ class AgentManagementService:
                 method=method,
                 project=project,
                 current_plugin=current_plugin,
+                current_source=current_source,
             )
             if not isinstance(result, GeneratedPlugin):
-                raise GenerationError("Pi returned invalid plugin bundle")
+                raise GenerationError("Pi returned plugin bundle with invalid schema")
             return result
         except GenerationCapacityError as exc:
             raise FeatureGenerationCapacityError("generation capacity is full") from exc

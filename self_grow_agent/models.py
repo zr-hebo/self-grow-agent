@@ -44,6 +44,7 @@ class PluginFeatureGenerator(Protocol):
         method: str,
         project: str,
         current_plugin: Any | None = None,
+        current_source: str | None = None,
     ) -> Any:
         """Generate a complete replacement plugin bundle."""
         ...

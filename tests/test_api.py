@@ -115,8 +115,8 @@ class AsyncBlockingFeatureGenerator:
 
 
 class FakePluginGenerator:
-    def __init__(self, *plugins: GeneratedPlugin) -> None:
-        self._plugins: Iterator[GeneratedPlugin] = iter(plugins)
+    def __init__(self, *plugins: GeneratedPlugin | Exception) -> None:
+        self._plugins: Iterator[GeneratedPlugin | Exception] = iter(plugins)
         self.calls: list[dict[str, object]] = []
 
     async def generate_plugin(
@@ -127,6 +127,7 @@ class FakePluginGenerator:
         method: str,
         project: str,
         current_plugin: GeneratedPlugin | None = None,
+        current_source: str | None = None,
     ) -> GeneratedPlugin:
         self.calls.append(
             {
@@ -135,9 +136,13 @@ class FakePluginGenerator:
                 "method": method,
                 "project": project,
                 "current_plugin": current_plugin,
+                "current_source": current_source,
             }
         )
-        return next(self._plugins)
+        result = next(self._plugins)
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 class InlineHandlerExecutor:
@@ -423,7 +428,9 @@ def test_management_api_creates_and_updates_complete_plugin_route(tmp_path: Path
         assert api_data(after_rollback) == {"value": "v1"}
 
     assert plugin_generator.calls[0]["current_plugin"] is None
+    assert plugin_generator.calls[0]["current_source"] is None
     assert isinstance(plugin_generator.calls[1]["current_plugin"], GeneratedPlugin)
+    assert plugin_generator.calls[1]["current_source"] is None
 
 
 def test_revise_defaults_an_existing_restricted_route_to_plugin(tmp_path: Path) -> None:
@@ -490,6 +497,7 @@ def test_revise_defaults_an_existing_restricted_route_to_plugin(tmp_path: Path) 
     assert updated.execution_mode == "plugin"
     assert updated.version == 2
     assert plugin_generator.calls[0]["current_plugin"] is None
+    assert plugin_generator.calls[0]["current_source"] == existing.source
 
 
 def assert_api_error(response: httpx.Response, message: str) -> None:
@@ -1315,6 +1323,41 @@ def test_async_operation_persists_adapter_authored_safe_pi_failure(
     task_logs = "\n".join(record.getMessage() for record in caplog.records)
     assert f"route_task failed operation_id={receipt['operation_id']}" in task_logs
     assert "error=Pi RPC run timed out" in task_logs
+
+
+def test_async_plugin_operation_persists_safe_bundle_failure(tmp_path: Path) -> None:
+    plugin_generator = FakePluginGenerator(
+        GenerationError("Pi returned plugin bundle rejected by policy")
+    )
+    app = build_app(
+        settings=make_settings(tmp_path),
+        generator=FakeFeatureGenerator(),
+        plugin_generator=plugin_generator,
+        handler_executor=InlineHandlerExecutor(),
+    )
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/api/v1/manage/routes",
+            headers=management_headers(),
+            json={
+                "project": "binlog-server",
+                "path": "/rebuild_replication",
+                "method": "POST",
+                "instruction": "Generate the route",
+            },
+        )
+        receipt = api_data(accepted)
+        for _ in range(100):
+            failed = api_data(
+                client.get(receipt["operation_url"], headers=management_headers())
+            )
+            if failed["status"] == "failed":
+                break
+            time.sleep(0.01)
+
+    assert accepted.status_code == 202
+    assert failed["last_error"] == "Pi returned plugin bundle rejected by policy"
 
 
 def test_retry_failed_update_creates_new_operation_with_current_route_version(
